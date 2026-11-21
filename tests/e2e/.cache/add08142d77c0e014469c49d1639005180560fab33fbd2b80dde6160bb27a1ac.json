@@ -1,0 +1,91 @@
+{
+  "schemaVersion": "trace-1",
+  "createdAt": "2026-11-21T18:50:05.476Z",
+  "payload": {
+    "actions": [
+      {
+        "name": "tap",
+        "summary": "tap button \"تسجيل الدخول\"",
+        "target": {
+          "role": "button",
+          "name": "تسجيل الدخول"
+        }
+      }
+    ],
+    "executor": {
+      "name": "e2e-default-agent",
+      "version": "2"
+    },
+    "recordedFor": {
+      "testId": "admin-session-and-agent-room.e2e.ts::admin-session-and-agent-room",
+      "targetId": "web",
+      "instructionDigest": "e11816bf6ada704076a229ea696a27e9a826dea50d304bbadc97ccad8ba8f405",
+      "paramsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "callIndex": 0,
+      "agent": "default"
+    },
+    "recordedBy": {
+      "provider": "anthropic.messages",
+      "model": "claude-sonnet-5-5"
+    },
+    "summary": "Signed in. The admin dashboard now shows the create-group form and a Sign out button (تسجيل الخروج).",
+    "startPath": "/admin",
+    "endPath": "/admin",
+    "endAnchors": [
+      {
+        "text": "مجموعات البوتات"
+      },
+      {
+        "role": "button",
+        "name": "تسجيل الخروج"
+      },
+      {
+        "role": "heading",
+        "name": "إنشاء مجموعة جديدة"
+      },
+      {
+        "text": "حدد البوتات وطريقة تبادل الأدوار ثم ابدأ المحادثة."
+      },
+      {
+        "text": "اسم المجموعة"
+      },
+      {
+        "role": "textbox",
+        "name": "اسم المجموعة",
+        "value": "فريق البوتات"
+      },
+      {
+        "text": "الموضوع"
+      },
+      {
+        "role": "textbox",
+        "name": "الموضوع",
+        "placeholder": "مثال: إطلاق النسخة الأولى"
+      }
+    ],
+    "goneAnchors": [
+      {
+        "role": "heading",
+        "name": "دخول المشرف"
+      },
+      {
+        "text": "سجّل الدخول بهوية الإنترنت لإدارة مجموعات البوتات ومتابعة محادثاتها."
+      },
+      {
+        "role": "button",
+        "name": "تسجيل الدخول"
+      }
+    ],
+    "endWaitMs": 22351,
+    "keyedBy": {
+      "cacheSchema": "trace-1",
+      "policyVersion": "conservative/6",
+      "project": "403fcccf39e2650a7e389bda5a9246bfe8c725769a98b3a749be67a096c16423",
+      "platform": "web",
+      "engineName": "web",
+      "engineSpiVersion": 1,
+      "appIdentity": "aec5acc8a8d7ba14d388c35095196d67ae7ad7199ff1168a3230addcf190cf8d",
+      "agentContextDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

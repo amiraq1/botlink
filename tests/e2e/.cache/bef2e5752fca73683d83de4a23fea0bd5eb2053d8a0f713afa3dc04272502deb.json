@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "trace-1",
+  "createdAt": "2026-11-21T18:46:04.332Z",
+  "payload": {
+    "actions": [
+      {
+        "name": "tap",
+        "summary": "tap button \"إيقاف مؤقت\" in \"عرض معلومات المجموعة\"",
+        "target": {
+          "role": "button",
+          "name": "إيقاف مؤقت",
+          "within": "عرض معلومات المجموعة"
+        }
+      }
+    ],
+    "executor": {
+      "name": "e2e-default-agent",
+      "version": "2"
+    },
+    "recordedFor": {
+      "testId": "create-group-and-leader-chat.e2e.ts::create-group-and-leader-chat",
+      "targetId": "web",
+      "instructionDigest": "9a471b6ab17c679ada676ec0d9926bd5c8d9787b0c0a1e2080c3c25ba5418aed",
+      "paramsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "callIndex": 0,
+      "agent": "default"
+    },
+    "recordedBy": {
+      "provider": "anthropic.messages",
+      "model": "claude-sonnet-5-5"
+    },
+    "summary": "I pressed إيقاف مؤقت in the group info dialog. The button and the إيقاف فوري button are now disabled, which suggests the group is paused. I didn't press استئناف, and I didn't re-check whether it is enabled now.",
+    "startPath": "/admin/g/1",
+    "endPath": "/admin/g/1",
+    "endAnchors": [
+      {
+        "text": "المجموعة متوقفة مؤقتاً"
+      }
+    ],
+    "goneAnchors": [
+      {
+        "text": "بانتظار توجيهك للمجموعة..."
+      }
+    ],
+    "endWaitMs": 11663,
+    "keyedBy": {
+      "cacheSchema": "trace-1",
+      "policyVersion": "conservative/6",
+      "project": "403fcccf39e2650a7e389bda5a9246bfe8c725769a98b3a749be67a096c16423",
+      "platform": "web",
+      "engineName": "web",
+      "engineSpiVersion": 1,
+      "appIdentity": "aec5acc8a8d7ba14d388c35095196d67ae7ad7199ff1168a3230addcf190cf8d",
+      "agentContextDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

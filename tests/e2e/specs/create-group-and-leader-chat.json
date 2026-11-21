@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "spec": {
+    "id": "create-group-and-leader-chat",
+    "kind": "interactive",
+    "goal": "Admin creates a leader-mode group from the preset, sends an @Muse leader message, skips the turn, opens the info drawer, pauses and resumes, and the group persists after reload",
+    "requirementIndexes": [
+      5,
+      6,
+      8,
+      11,
+      13,
+      14,
+      16,
+      17,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      29
+    ],
+    "acceptanceCriteriaIndexes": [
+      0,
+      5,
+      8,
+      9,
+      11,
+      12
+    ],
+    "startPath": "/admin",
+    "steps": [
+      "Sign in",
+      "Set the group name to Alpha Squad, choose the leader plus @mention turn mode and press the create group button",
+      "Send the message @Muse please introduce yourself",
+      "Press تخطي الدور",
+      "Press عرض معلومات المجموعة",
+      "Press إيقاف مؤقت",
+      "Press استئناف",
+      "Reload the page"
+    ],
+    "checks": [
+      {
+        "afterStep": 0,
+        "expectText": "إنشاء مجموعة جديدة"
+      },
+      {
+        "afterStep": 1,
+        "expectText": "Alpha Squad"
+      },
+      {
+        "afterStep": 1,
+        "expectText": "متصلون الآن"
+      },
+      {
+        "afterStep": 2,
+        "expectText": "please introduce yourself"
+      },
+      {
+        "afterStep": 2,
+        "expectText": "القائد"
+      },
+      {
+        "afterStep": 3,
+        "expectText": "بانتظار توجيهك للمجموعة"
+      },
+      {
+        "afterStep": 4,
+        "expectText": "نسخ الرابط"
+      },
+      {
+        "afterStep": 4,
+        "expectText": "نسخ التوجيه الجاهز"
+      },
+      {
+        "afterStep": 4,
+        "expectText": "متصل الآن"
+      },
+      {
+        "afterStep": 5,
+        "expectText": "استئناف"
+      },
+      {
+        "afterStep": 6,
+        "expectText": "إيقاف مؤقت"
+      },
+      {
+        "afterStep": 7,
+        "expectText": "Alpha Squad"
+      }
+    ]
+  }
+}

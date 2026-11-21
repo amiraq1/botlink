@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "flows": {
+    "admin-session-and-agent-room": {
+      "flowId": "admin-session-and-agent-room",
+      "specDigest": "f27524ff0a2d420bc02d6bec995a7767dec1ac6d624ec894a44379754c364c19",
+      "status": "recorded",
+      "recordedAt": "2026-11-21T18:52:40.396Z",
+      "recordedBy": "claude-sonnet-5-5",
+      "entries": [
+        "add08142d77c0e014469c49d1639005180560fab33fbd2b80dde6160bb27a1ac.json",
+        "8ca611efdde69f9e5f64686c1b8d6f264eb05150a86a32d92855c9560e4c8880.json",
+        "2c79c0fa03aee853bdcf1b14f61977909c4c2504e0ce4d99e379bebae8e38a74.json"
+      ],
+      "ranAfter": [
+        "create-group-and-leader-chat",
+        "groups-list-and-add-bot"
+      ],
+      "ranWith": [
+        "create-group-and-leader-chat",
+        "groups-list-and-add-bot"
+      ]
+    },
+    "completes-at-max-turns": {
+      "flowId": "completes-at-max-turns",
+      "specDigest": "b83d1f4003e1b96812d1053d254ca1c70fb84f1619551cc5914ef24f598bccf0",
+      "status": "recorded",
+      "recordedAt": "2026-11-21T18:52:40.407Z",
+      "recordedBy": "claude-sonnet-5-5",
+      "entries": [
+        "9105fce1659eb1abb0873601b0304f010b71e3159369d58a80391b30e3a1434f.json",
+        "eb391c3e87c7e0a262a85c1890080f15a0b56b09a0653cab4f915d9c1e3f86e0.json",
+        "633435c48f7a56504fd7f9ec83fbd4f0e7e8157e85af3adf96408c738a918d69.json",
+        "c67f415d8edc1a10b5855aa81258538151a29b2f5e27cf858b2d5fa2a862ca86.json"
+      ],
+      "ranAfter": [
+        "admin-session-and-agent-room",
+        "create-group-and-leader-chat",
+        "groups-list-and-add-bot"
+      ],
+      "ranWith": [
+        "admin-session-and-agent-room",
+        "create-group-and-leader-chat",
+        "groups-list-and-add-bot"
+      ]
+    },
+    "create-group-and-leader-chat": {
+      "flowId": "create-group-and-leader-chat",
+      "specDigest": "8ea53396eca0c6c2dee30fa8f66bfd2fcb8cc18b4a17e97ccaa04066cb4910e8",
+      "status": "recorded",
+      "recordedAt": "2026-11-21T18:52:40.391Z",
+      "recordedBy": "claude-sonnet-5-5",
+      "entries": [
+        "f5bd3078c71bedf6bd4160186ca8d157c6867c703de320613f68aa20658cf68b.json",
+        "1c454e26b2fbb1df3a43c0f0fa9f370451f7ad20a12947a6289cf4d35848d526.json",
+        "d72fd56814e2c6eec524eae7f0745b393452377dc9ad7d260f0719a3394a760e.json",
+        "d2a397554f36fc1997473c8be64c53275175d237a9d6d7fb78b8fe4c475e0ca4.json",
+        "0eb17ecbceb1ed139f7af0497601345761e8bede0423aa8ce0b2b79365901dd7.json",
+        "bef2e5752fca73683d83de4a23fea0bd5eb2053d8a0f713afa3dc04272502deb.json",
+        "d32f12f15b296fa699b64acf5df54858f391b84600743ce5bbc6a1dd92267307.json"
+      ],
+      "ranAfter": [],
+      "ranWith": []
+    },
+    "groups-list-and-add-bot": {
+      "flowId": "groups-list-and-add-bot",
+      "specDigest": "78d63ff3a2beddeaea50394041860ab9328c28785eb116552b64d1d9c9557974",
+      "status": "recorded",
+      "recordedAt": "2026-11-21T18:52:40.396Z",
+      "recordedBy": "claude-sonnet-5-5",
+      "entries": [
+        "748d81dc8a66a8233d9cc0ffa7820f4e1efce558a2b2d8ff31825d92117c3f1d.json",
+        "a9944641a1d66de8c66ba1c7a9c4ab6c6a87164059a1b3d082589f5fce21fdd8.json",
+        "7313e65d6ffdc5b89cd9f3386cace91fb043bb5b2e91513c75ac7b07976f4c68.json",
+        "467b6e7f22c7b11ca33699c5006be55832e81876346a0ee0cc4fe7f73261deb1.json"
+      ],
+      "ranAfter": [
+        "create-group-and-leader-chat"
+      ],
+      "ranWith": [
+        "create-group-and-leader-chat"
+      ]
+    },
+    "invalid-token": {
+      "flowId": "invalid-token",
+      "specDigest": "d9a9adb6193c31af201f6f920fcc2eb77eb1de4c69fdaf9462a5fb73eb717e3d",
+      "status": "recorded",
+      "recordedAt": "2026-11-21T15:08:41.836Z",
+      "recordedBy": "claude-sonnet-5-5",
+      "entries": [],
+      "ranAfter": [],
+      "ranWith": [],
+      "passedTree": "c62877085512dbbbb2d392d13c4cfd2820b731ac",
+      "visitedPaths": [
+        "/a/00000000000000000000000000000000"
+      ]
+    },
+    "non-admin-cannot-see-groups": {
+      "flowId": "non-admin-cannot-see-groups",
+      "specDigest": "387880bbf3f3752f2ccc1b9b0b062e1386c65dad8864357fa3824e052ede965b",
+      "status": "recorded",
+      "recordedAt": "2026-11-21T18:46:55.804Z",
+      "recordedBy": "claude-sonnet-5-5",
+      "entries": [
+        "0bc63a67d5ea7031b7fbfba02afa193a42d223e587cec48089181d038b0b3b1d.json"
+      ],
+      "ranAfter": [
+        "admin-session-and-agent-room",
+        "completes-at-max-turns",
+        "create-group-and-leader-chat",
+        "groups-list-and-add-bot"
+      ],
+      "ranWith": [
+        "admin-session-and-agent-room",
+        "completes-at-max-turns",
+        "create-group-and-leader-chat",
+        "groups-list-and-add-bot"
+      ],
+      "passedTree": "c62877085512dbbbb2d392d13c4cfd2820b731ac",
+      "visitedPaths": [
+        "/admin"
+      ]
+    }
+  }
+}

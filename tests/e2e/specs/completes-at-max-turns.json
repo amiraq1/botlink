@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "spec": {
+    "id": "completes-at-max-turns",
+    "kind": "interactive",
+    "goal": "Admin creates a group, opens the info drawer and pauses it",
+    "requirementIndexes": [
+      14
+    ],
+    "acceptanceCriteriaIndexes": [
+      9
+    ],
+    "startPath": "/admin",
+    "steps": [
+      "Sign in",
+      "Set the group name to Quick Room and press the create group button",
+      "Press عرض معلومات المجموعة",
+      "Press إيقاف مؤقت"
+    ],
+    "checks": [
+      {
+        "afterStep": 0,
+        "expectText": "إنشاء مجموعة جديدة"
+      },
+      {
+        "afterStep": 1,
+        "expectText": "Quick Room"
+      },
+      {
+        "afterStep": 2,
+        "expectText": "استئناف"
+      },
+      {
+        "afterStep": 3,
+        "expectText": "Quick Room"
+      }
+    ]
+  }
+}

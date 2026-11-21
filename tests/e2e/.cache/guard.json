@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "flows": {
+    "admin-session-and-agent-room": {
+      "plan": [
+        "9f0fd7f64ec69ef9",
+        "d23d658542d62fa8"
+      ],
+      "last": "passed"
+    },
+    "completes-at-max-turns": {
+      "plan": [
+        "0cc4b49bdc822a36",
+        "59900c06baa3de6e"
+      ],
+      "last": "passed"
+    },
+    "create-group-and-leader-chat": {
+      "plan": [
+        "0cc4b49bdc822a36",
+        "10fc4ec16831bbd0",
+        "244a8d67aeb5392c",
+        "24820b261028be9b",
+        "2776e21da8f03396",
+        "3a8fe48037dad9f5",
+        "4d41fc13cc09a0fc",
+        "4e25d49a0ca41845",
+        "59900c06baa3de6e",
+        "60d82c9d3430d62c",
+        "73521083ae47559c",
+        "76aa657abf2df3bf",
+        "78843797eee24b3f",
+        "7cf51d363c952c6f",
+        "818399a66adba677",
+        "9f0fd7f64ec69ef9",
+        "b30ecaa799c585ea",
+        "b4866b7abd982a82",
+        "b7076b3275e3dd6b",
+        "cf1c2512a2785acf",
+        "d23d658542d62fa8",
+        "e4de5def5fa02b97",
+        "f1caf222eec8a46a"
+      ],
+      "last": "passed"
+    },
+    "groups-list-and-add-bot": {
+      "plan": [
+        "158e26d2e7891e1f",
+        "493d953d5095475a",
+        "6d21fd298f750a54",
+        "bead6539ce41089b"
+      ],
+      "last": "passed"
+    },
+    "invalid-token": {
+      "plan": [
+        "0c2225777e034fb3",
+        "37ccfb210e6d8e42"
+      ],
+      "last": "passed"
+    },
+    "non-admin-cannot-see-groups": {
+      "plan": [
+        "43ce4ae2b8bb9af3",
+        "de1bb7b81d360a5e"
+      ],
+      "last": "passed"
+    }
+  },
+  "order": [
+    "invalid-token",
+    "create-group-and-leader-chat",
+    "groups-list-and-add-bot",
+    "non-admin-cannot-see-groups",
+    "admin-session-and-agent-room",
+    "completes-at-max-turns"
+  ]
+}

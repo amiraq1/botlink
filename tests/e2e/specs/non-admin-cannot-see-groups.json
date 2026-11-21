@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "spec": {
+    "id": "non-admin-cannot-see-groups",
+    "kind": "interactive",
+    "goal": "A second signed-in user who is not the admin sees no groups and no create-group card",
+    "requirementIndexes": [
+      0
+    ],
+    "acceptanceCriteriaIndexes": [
+      1
+    ],
+    "startPath": "/admin",
+    "persona": "guest",
+    "steps": [
+      "Sign in"
+    ],
+    "checks": [
+      {
+        "afterStep": 0,
+        "expectNoText": "إنشاء مجموعة جديدة"
+      },
+      {
+        "afterStep": 0,
+        "expectNoText": "Alpha Squad"
+      }
+    ]
+  }
+}

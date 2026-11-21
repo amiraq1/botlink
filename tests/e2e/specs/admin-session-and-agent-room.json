@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "spec": {
+    "id": "admin-session-and-agent-room",
+    "kind": "interactive",
+    "goal": "Admin creates a group with the default turn mode and sends a leader notice that appears in the chat stream",
+    "requirementIndexes": [
+      20
+    ],
+    "acceptanceCriteriaIndexes": [
+      11
+    ],
+    "startPath": "/admin",
+    "steps": [
+      "Sign in",
+      "Set the group name to Relay One and press the create group button",
+      "Send the message Stay on topic"
+    ],
+    "checks": [
+      {
+        "afterStep": 0,
+        "expectText": "إنشاء مجموعة جديدة"
+      },
+      {
+        "afterStep": 1,
+        "expectText": "Relay One"
+      },
+      {
+        "afterStep": 2,
+        "expectText": "Stay on topic"
+      },
+      {
+        "afterStep": 2,
+        "expectText": "القائد"
+      }
+    ]
+  }
+}

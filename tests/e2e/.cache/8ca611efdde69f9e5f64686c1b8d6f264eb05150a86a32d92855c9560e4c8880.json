@@ -1,0 +1,116 @@
+{
+  "schemaVersion": "trace-1",
+  "createdAt": "2026-11-21T18:50:05.478Z",
+  "payload": {
+    "actions": [
+      {
+        "name": "type",
+        "summary": "type \"Relay One\" into textbox \"اسم المجموعة\"",
+        "target": {
+          "role": "textbox",
+          "name": "اسم المجموعة"
+        },
+        "value": "Relay One"
+      },
+      {
+        "name": "tap",
+        "summary": "tap button \"إنشاء المجموعة\"",
+        "target": {
+          "role": "button",
+          "name": "إنشاء المجموعة"
+        }
+      }
+    ],
+    "executor": {
+      "name": "e2e-default-agent",
+      "version": "2"
+    },
+    "recordedFor": {
+      "testId": "admin-session-and-agent-room.e2e.ts::admin-session-and-agent-room",
+      "targetId": "web",
+      "instructionDigest": "4748f07f6461ec338c66b30ea3776dd80585a4e44bbba448bc1d9344594dd67f",
+      "paramsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "callIndex": 0,
+      "agent": "default"
+    },
+    "recordedBy": {
+      "provider": "anthropic.messages",
+      "model": "claude-sonnet-5-5"
+    },
+    "summary": "Set group name to Relay One and pressed create; app navigated to /admin/g/2 showing the \"Relay One\" group room with message box.",
+    "startPath": "/admin",
+    "endPath": "/admin/g/2",
+    "endAnchors": [
+      {
+        "role": "link",
+        "name": "العودة إلى المجموعات"
+      },
+      {
+        "role": "image",
+        "name": "Muse"
+      },
+      {
+        "role": "image",
+        "name": "Grok Bot"
+      },
+      {
+        "role": "image",
+        "name": "Cue"
+      },
+      {
+        "role": "heading",
+        "name": "Relay One"
+      },
+      {
+        "text": "١ أعضاء متصلون الآن"
+      },
+      {
+        "text": "عرض معلومات المجموعة"
+      },
+      {
+        "text": "إيقاف مؤقت"
+      }
+    ],
+    "goneAnchors": [
+      {
+        "text": "BOTLINK"
+      },
+      {
+        "text": "مجموعات البوتات"
+      },
+      {
+        "role": "button",
+        "name": "تسجيل الخروج"
+      },
+      {
+        "role": "heading",
+        "name": "إنشاء مجموعة جديدة"
+      },
+      {
+        "text": "حدد البوتات وطريقة تبادل الأدوار ثم ابدأ المحادثة."
+      },
+      {
+        "text": "اسم المجموعة"
+      },
+      {
+        "role": "textbox",
+        "name": "اسم المجموعة",
+        "value": "فريق البوتات"
+      },
+      {
+        "text": "الموضوع"
+      }
+    ],
+    "endWaitMs": 12525,
+    "keyedBy": {
+      "cacheSchema": "trace-1",
+      "policyVersion": "conservative/6",
+      "project": "403fcccf39e2650a7e389bda5a9246bfe8c725769a98b3a749be67a096c16423",
+      "platform": "web",
+      "engineName": "web",
+      "engineSpiVersion": 1,
+      "appIdentity": "aec5acc8a8d7ba14d388c35095196d67ae7ad7199ff1168a3230addcf190cf8d",
+      "agentContextDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

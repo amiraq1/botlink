@@ -1,0 +1,129 @@
+{
+  "schemaVersion": "trace-1",
+  "createdAt": "2026-11-21T15:06:32.288Z",
+  "payload": {
+    "actions": [
+      {
+        "name": "type",
+        "summary": "type \"Relay One\" into textbox \"Title\" in \"Create a session\"",
+        "target": {
+          "role": "textbox",
+          "name": "Title",
+          "placeholder": "e.g. Weekend trip planning",
+          "within": "Create a session"
+        },
+        "value": "Relay One"
+      },
+      {
+        "name": "type",
+        "summary": "type \"Gardening\" into textbox \"Topic\" in \"Create a session\"",
+        "target": {
+          "role": "textbox",
+          "name": "Topic",
+          "placeholder": "What should the bots talk about?",
+          "within": "Create a session"
+        },
+        "value": "Gardening"
+      },
+      {
+        "name": "tap",
+        "summary": "tap button \"Create session\" in \"Create a session\"",
+        "target": {
+          "role": "button",
+          "name": "Create session",
+          "within": "Create a session"
+        }
+      }
+    ],
+    "executor": {
+      "name": "e2e-default-agent",
+      "version": "2"
+    },
+    "recordedFor": {
+      "testId": "admin-session-and-agent-room.e2e.ts::admin-session-and-agent-room",
+      "targetId": "web",
+      "instructionDigest": "6afefbd65c0a90380a72d4ef21783053294fe7dca9c7a67cbaa912c85076f365",
+      "paramsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "callIndex": 0,
+      "agent": "default"
+    },
+    "recordedBy": {
+      "provider": "anthropic.messages",
+      "model": "claude-sonnet-5-5"
+    },
+    "summary": "Created session Relay One (topic Gardening); app navigated to /admin/c/1 showing the Relay One thread, status running, Turn 1/10.",
+    "startPath": "/",
+    "endPath": "/admin/c/1",
+    "endAnchors": [
+      {
+        "role": "link",
+        "name": "Back to sessions"
+      },
+      {
+        "role": "heading",
+        "name": "Relay One"
+      },
+      {
+        "text": "running"
+      },
+      {
+        "text": "Gardening"
+      },
+      {
+        "text": "Turn: 1 / 10"
+      },
+      {
+        "text": "Turn of: Muse"
+      },
+      {
+        "text": "No messages yet"
+      },
+      {
+        "text": "The first reply will appear here as soon as a bot sends it."
+      }
+    ],
+    "goneAnchors": [
+      {
+        "role": "heading",
+        "name": "Create a session"
+      },
+      {
+        "role": "heading",
+        "name": "New session"
+      },
+      {
+        "text": "Set up a conversation between two bots and share the agent links."
+      },
+      {
+        "text": "Title"
+      },
+      {
+        "role": "textbox",
+        "name": "Title",
+        "placeholder": "e.g. Weekend trip planning"
+      },
+      {
+        "text": "Topic"
+      },
+      {
+        "role": "textbox",
+        "name": "Topic",
+        "placeholder": "What should the bots talk about?"
+      },
+      {
+        "text": "Mode"
+      }
+    ],
+    "endWaitMs": 12067,
+    "keyedBy": {
+      "cacheSchema": "trace-1",
+      "policyVersion": "conservative/6",
+      "project": "403fcccf39e2650a7e389bda5a9246bfe8c725769a98b3a749be67a096c16423",
+      "platform": "web",
+      "engineName": "web",
+      "engineSpiVersion": 1,
+      "appIdentity": "aec5acc8a8d7ba14d388c35095196d67ae7ad7199ff1168a3230addcf190cf8d",
+      "agentContextDigest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "spec": {
+    "id": "invalid-token",
+    "kind": "interactive",
+    "goal": "An unknown agent link shows a plain invalid link message without login",
+    "requirementIndexes": [],
+    "acceptanceCriteriaIndexes": [],
+    "startPath": "/a/00000000000000000000000000000000",
+    "steps": [
+      "Reload the page"
+    ],
+    "checks": [
+      {
+        "afterStep": 0,
+        "expectText": "Invalid link"
+      }
+    ]
+  }
+}

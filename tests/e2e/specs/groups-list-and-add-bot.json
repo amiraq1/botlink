@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "spec": {
+    "id": "groups-list-and-add-bot",
+    "kind": "interactive",
+    "goal": "Admin sees the created group in the groups list, opens it and adds a new bot member in the info drawer",
+    "requirementIndexes": [
+      18,
+      19,
+      28
+    ],
+    "acceptanceCriteriaIndexes": [
+      15
+    ],
+    "startPath": "/admin",
+    "steps": [
+      "Sign in",
+      "Press Open on the Alpha Squad group",
+      "Press عرض معلومات المجموعة",
+      "Add a bot named Nova with role title Tester and press the add bot button"
+    ],
+    "checks": [
+      {
+        "afterStep": 0,
+        "expectText": "Alpha Squad"
+      },
+      {
+        "afterStep": 0,
+        "expectText": "إنشاء مجموعة جديدة"
+      },
+      {
+        "afterStep": 1,
+        "expectText": "Alpha Squad"
+      },
+      {
+        "afterStep": 2,
+        "expectText": "نسخ الرابط"
+      },
+      {
+        "afterStep": 3,
+        "expectText": "Nova"
+      }
+    ]
+  }
+}
