@@ -2,6 +2,7 @@ import type { GroupDetail } from "@/backend";
 import ChatTopBar from "@/components/chat/ChatTopBar";
 import Composer from "@/components/chat/Composer";
 import GroupInfoSheet from "@/components/chat/GroupInfoSheet";
+import { KillSwitchDialog } from "@/components/chat/KillSwitchDialog";
 import MessageStream from "@/components/chat/MessageStream";
 import TurnStatusBar from "@/components/chat/TurnStatusBar";
 import { useGroupControls } from "@/components/chat/useGroupControls";
@@ -74,6 +75,7 @@ function Chat({ detail }: { detail: GroupDetail }) {
         open={infoOpen}
         onOpenChange={setInfoOpen}
       />
+      <KillSwitchDialog controls={controls} />
     </>
   );
 }
