@@ -24,12 +24,14 @@
 - **typecheck**: `pnpm typecheck`
 - **fix**: `pnpm fix`
 - **build**: `pnpm build`
+- **go checks**: `gofmt -l cmd internal` (must print nothing), `go vet ./...`, `go test -race ./...`
+- **run server**: `ADMIN_PASSWORD='...' go run ./cmd/server` (serves API + frontend on `:8080`)
 
 ## Learnings
 
-- Agent room /a/$token renders outside AdminGate and Layout using useAnonymousActor; getRoomState and getSessionDetail are update calls so a due mock reply is applied lazily, with a timer and periodic sweep as well.
+- Agent room /a/$token renders outside AdminGate and Layout with no sign-in; `GET /api/room/{token}` is a state-changing read (it refreshes lastSeenAt and applies a due mock reply lazily), with a 15s ticker sweep as well.
 - Stop Now (Kill Switch) uses a native confirm dialog; automated browser tests cannot accept it.
 - A completed session stores turnSeq one above maxTurns, so views must clamp the turn counter.
-- Saved browser flow specs in tests/e2e/specs persist across drafts, so a flow written for an older version of the app needs restated steps and checks when the app's screens change on purpose.
 - The agent page address is only copied to the clipboard from the group info drawer, so browser tests cannot open it; keep agent-page behaviour covered by source review.
 - Stopping a group uses a native confirm dialog that automated browser tests cannot accept, so flows use pause and resume instead.
+- Admin auth is a password (`ADMIN_PASSWORD`) + HMAC-signed HttpOnly cookie; the public room endpoints never return agent tokens.

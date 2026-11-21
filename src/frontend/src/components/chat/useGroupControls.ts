@@ -1,4 +1,4 @@
-import { GroupStatus } from "@/backend";
+import { GroupStatus } from "@/lib/api";
 import {
   usePauseGroup,
   useResumeGroup,
@@ -8,7 +8,7 @@ import { isGroupEnded } from "@/lib/convert";
 import { useState } from "react";
 
 /** Pause / resume / kill-switch actions shared by the top bar and the info drawer. */
-export function useGroupControls(groupId: bigint, status: GroupStatus) {
+export function useGroupControls(groupId: number, status: GroupStatus) {
   const pause = usePauseGroup();
   const resume = useResumeGroup();
   const stop = useStopGroup();

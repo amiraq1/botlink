@@ -1,4 +1,4 @@
-import { GroupStatus, type RoomState } from "@/backend";
+import { GroupStatus, type RoomState } from "@/lib/api";
 import { bigintToNumber } from "@/lib/convert";
 
 export type RoomStatusKey =

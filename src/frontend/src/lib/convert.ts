@@ -1,34 +1,34 @@
-import { GroupStatus, TurnMode } from "@/backend";
+import { GroupStatus, TurnMode } from "@/lib/api";
 
-/** Safe conversions between backend values (bigint, nanosecond Time) and JS values. */
+/** Safe conversions between backend values (plain numbers, Unix-ms timestamps) and JS values. */
 
-/** Motoko `Time.now()` values are nanosecond bigints. Returns null when the value is not a valid date. */
-export function timestampToDate(timestamp: bigint): Date | null {
-  const date = new Date(Number(timestamp / 1_000_000n));
+/** Go API timestamps are Unix milliseconds. Returns null when the value is not a valid date. */
+export function timestampToDate(timestamp: number): Date | null {
+  const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-/** Converts a bigint counter (turns, delays) to a JS number, clamping to the safe integer range. */
-export function bigintToNumber(value: bigint): number {
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) return Number.MAX_SAFE_INTEGER;
-  if (value < BigInt(Number.MIN_SAFE_INTEGER)) return Number.MIN_SAFE_INTEGER;
-  return Number(value);
+/** Identity helper kept for call-site compatibility: counters are plain numbers now. */
+export function bigintToNumber(value: number): number {
+  if (value > Number.MAX_SAFE_INTEGER) return Number.MAX_SAFE_INTEGER;
+  if (value < Number.MIN_SAFE_INTEGER) return Number.MIN_SAFE_INTEGER;
+  return value;
 }
 
-/** Converts a JS number to a non-negative bigint, flooring fractions and treating NaN as 0. */
-export function numberToBigint(value: number): bigint {
-  if (!Number.isFinite(value) || value <= 0) return 0n;
-  return BigInt(Math.floor(value));
+/** Converts a JS number to a non-negative integer, flooring fractions and treating NaN as 0. */
+export function numberToBigint(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.floor(value);
 }
 
 /** Parses a route param into a group id, or null when it is not a whole number. */
-export function parseGroupId(raw: string | undefined): bigint | null {
+export function parseGroupId(raw: string | undefined): number | null {
   if (!raw || !/^\d+$/.test(raw)) return null;
-  return BigInt(raw);
+  return Number(raw);
 }
 
 /** Turn counter clamped to maxTurns (a completed group stores turnSeq one above maxTurns). */
-export function clampTurn(turnSeq: bigint, maxTurns: bigint): number {
+export function clampTurn(turnSeq: number, maxTurns: number): number {
   return Math.min(bigintToNumber(turnSeq), bigintToNumber(maxTurns));
 }
 
@@ -55,12 +55,12 @@ const dateYearFormat = new Intl.DateTimeFormat(AR_LOCALE, {
 const numberFormat = new Intl.NumberFormat(AR_LOCALE);
 
 /** Arabic-Indic digits for a plain number, e.g. 12 -> "١٢". */
-export function formatNumberAr(value: number | bigint): string {
+export function formatNumberAr(value: number): string {
   return numberFormat.format(value);
 }
 
 /** Clock time like "٨:٣٠ م", or a fallback when the timestamp is invalid. */
-export function formatClockAr(timestamp: bigint, fallback = "--:--"): string {
+export function formatClockAr(timestamp: number, fallback = "--:--"): string {
   const date = timestampToDate(timestamp);
   return date ? clockFormat.format(date) : fallback;
 }
@@ -74,7 +74,7 @@ function startOfDay(date: Date): number {
 }
 
 /** Stable key for grouping messages by local calendar day. */
-export function dayKey(timestamp: bigint): string {
+export function dayKey(timestamp: number): string {
   const date = timestampToDate(timestamp);
   return date ? String(startOfDay(date)) : "invalid";
 }
@@ -83,7 +83,7 @@ const DAY_MS = 86_400_000;
 
 /** Day divider label: "اليوم، ٨:٣٠ م", "أمس، ٨:٣٠ م" or the date for older days. */
 export function formatDayDividerAr(
-  timestamp: bigint,
+  timestamp: number,
   now: Date = new Date(),
 ): string {
   const date = timestampToDate(timestamp);
@@ -97,7 +97,7 @@ export function formatDayDividerAr(
 
 /** Compact label for list rows: clock for today, "أمس" for yesterday, else the short date. */
 export function formatListTimeAr(
-  timestamp: bigint,
+  timestamp: number,
   now: Date = new Date(),
 ): string {
   const date = timestampToDate(timestamp);
@@ -171,12 +171,12 @@ export function isMemberOnline(member: {
 }
 
 /** Arabic presence label, e.g. "٣ متصل". */
-export function onlineCountLabelAr(online: number | bigint): string {
+export function onlineCountLabelAr(online: number): string {
   return `${formatNumberAr(online)} متصل`;
 }
 
 /** Arabic turn progress, e.g. "الدور ٤/٢٠". */
-export function turnProgressAr(turnSeq: bigint, maxTurns: bigint): string {
+export function turnProgressAr(turnSeq: number, maxTurns: number): string {
   return `الدور ${formatNumberAr(clampTurn(turnSeq, maxTurns))}/${formatNumberAr(maxTurns)}`;
 }
 

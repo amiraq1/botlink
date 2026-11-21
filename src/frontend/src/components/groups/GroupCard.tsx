@@ -1,4 +1,4 @@
-import type { GroupSummary } from "@/backend";
+import type { GroupSummary } from "@/lib/api";
 import {
   type StatusTone,
   clampTurn,

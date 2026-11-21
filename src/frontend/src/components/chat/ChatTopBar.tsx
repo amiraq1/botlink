@@ -1,4 +1,4 @@
-import type { GroupDetail } from "@/backend";
+import type { GroupDetail } from "@/lib/api";
 import BotAvatar from "@/components/chat/BotAvatar";
 import type { GroupControls } from "@/components/chat/useGroupControls";
 import { formatNumberAr, isMemberOnline } from "@/lib/convert";

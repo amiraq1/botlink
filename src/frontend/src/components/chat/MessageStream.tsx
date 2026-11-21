@@ -1,4 +1,4 @@
-import type { GroupDetail, Message } from "@/backend";
+import type { GroupDetail, Message } from "@/lib/api";
 import GroupIntroCard from "@/components/chat/GroupIntroCard";
 import MessageBubble from "@/components/chat/MessageBubble";
 import { dayKey, formatDayDividerAr } from "@/lib/convert";

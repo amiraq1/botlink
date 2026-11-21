@@ -1,4 +1,4 @@
-import type { GroupDetail } from "@/backend";
+import type { GroupDetail } from "@/lib/api";
 import { useSendLeaderMessage } from "@/hooks/useAdminQueries";
 import { accentClass } from "@/lib/convert";
 import { cn } from "@/lib/utils";

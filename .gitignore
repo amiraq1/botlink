@@ -7,3 +7,9 @@ dist/
 .cache/
 .icp/
 /deployed/
+# Go + SQLite server
+data/
+*.db
+*.db-wal
+*.db-shm
+/botlink

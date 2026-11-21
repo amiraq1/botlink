@@ -1,5 +1,5 @@
-import type { RoomState } from "@/backend";
-import { GroupStatus } from "@/backend";
+import type { RoomState } from "@/lib/api";
+import { GroupStatus } from "@/lib/api";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const POLL_MS = 3000;

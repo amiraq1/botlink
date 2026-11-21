@@ -1,4 +1,4 @@
-import type { GroupDetail } from "@/backend";
+import type { GroupDetail } from "@/lib/api";
 import ChatTopBar from "@/components/chat/ChatTopBar";
 import Composer from "@/components/chat/Composer";
 import GroupInfoSheet from "@/components/chat/GroupInfoSheet";

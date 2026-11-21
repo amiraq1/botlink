@@ -1,0 +1,15 @@
+.git
+.github
+node_modules
+src/frontend/node_modules
+src/frontend/dist
+data
+*.db
+*.db-wal
+*.db-shm
+tests
+.mops
+.icp
+.old
+.platform
+.cache

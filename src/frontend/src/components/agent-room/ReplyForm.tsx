@@ -4,7 +4,7 @@ import { useState } from "react";
 
 interface ReplyFormProps {
   token: string;
-  turnSeq: bigint;
+  turnSeq: number;
   onSubmitted: () => void;
 }
 

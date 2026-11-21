@@ -5,62 +5,60 @@ import {
   type GroupSummary,
   type MemberInput,
   type TurnMode,
-  createActor,
-} from "@/backend";
-import { useActor, useInternetIdentity } from "@caffeineai/core-infrastructure";
+  addMember as apiAddMember,
+  checkAuth,
+  createGroup as apiCreateGroup,
+  getGroupDetail as apiGetGroupDetail,
+  listGroups as apiListGroups,
+  pauseGroup as apiPauseGroup,
+  removeMember as apiRemoveMember,
+  resumeGroup as apiResumeGroup,
+  rotateMemberToken,
+  sendLeaderMessage as apiSendLeaderMessage,
+  setMaxTurns as apiSetMaxTurns,
+  setTurnMode as apiSetTurnMode,
+  skipCurrentTurn as apiSkipCurrentTurn,
+  stopGroup as apiStopGroup,
+} from "@/lib/api";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 export type { CreateGroupInput, MemberInput };
 
 export const groupsKey = ["groups"] as const;
 export const groupKey = (id: GroupId) => ["group", id.toString()] as const;
+export const authKey = ["auth"] as const;
 
-function usePrincipalText(): string {
-  const { identity } = useInternetIdentity();
-  return identity?.getPrincipal().toText() ?? "anonymous";
-}
-
-/** Whether the signed-in caller is the app admin. Only enabled for a signed-in, ready actor. */
+/** Whether the current browser session holds a valid admin cookie. */
 export function useIsAdmin() {
-  const { actor, isFetching } = useActor(createActor);
-  const { isAuthenticated } = useInternetIdentity();
-  const principal = usePrincipalText();
   return useQuery<boolean>({
-    queryKey: ["isCallerAdmin", principal],
-    queryFn: async () => {
-      if (!actor) return false;
-      return actor.isCallerAdmin();
-    },
-    enabled: !!actor && !isFetching && isAuthenticated,
+    queryKey: authKey,
+    queryFn: () => checkAuth(),
     retry: 1,
+    staleTime: 30_000,
   });
 }
 
 /** All groups, most recently updated first, refreshed about every 5 seconds. */
 export function useGroups() {
-  const { actor, isFetching } = useActor(createActor);
   return useQuery<GroupSummary[]>({
     queryKey: groupsKey,
     queryFn: async () => {
-      if (!actor) return [];
-      const groups = await actor.listGroups();
+      const groups = await apiListGroups();
       return [...groups].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
-    enabled: !!actor && !isFetching,
     refetchInterval: 5000,
   });
 }
 
-/** Group detail, polled every 2.5s. getGroupDetail is an update call; null means unknown id. */
+/** Group detail, polled every 2.5s. Null means unknown id. */
 export function useGroupDetail(id: GroupId | null) {
-  const { actor, isFetching } = useActor(createActor);
   return useQuery<GroupDetail | null>({
     queryKey: id === null ? ["group", "none"] : groupKey(id),
     queryFn: async () => {
-      if (!actor || id === null) return null;
-      return actor.getGroupDetail(id);
+      if (id === null) return null;
+      return apiGetGroupDetail(id);
     },
-    enabled: !!actor && !isFetching && id !== null,
+    enabled: id !== null,
     refetchInterval: 2500,
   });
 }
@@ -77,13 +75,9 @@ function useRefreshGroups() {
 }
 
 export function useCreateGroup() {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
   return useMutation<GroupId, Error, CreateGroupInput>({
-    mutationFn: async (input) => {
-      if (!actor) throw new Error("Backend is not ready");
-      return actor.createGroup(input);
-    },
+    mutationFn: (input) => apiCreateGroup(input),
     onSuccess: () => {
       refresh();
     },
@@ -91,33 +85,28 @@ export function useCreateGroup() {
 }
 
 export function useSendLeaderMessage() {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
   return useMutation<void, Error, { groupId: GroupId; text: string }>({
-    mutationFn: async ({ groupId, text }) => {
-      if (!actor) throw new Error("Backend is not ready");
-      await actor.sendLeaderMessage(groupId, text);
-    },
+    mutationFn: ({ groupId, text }) => apiSendLeaderMessage(groupId, text),
     onSuccess: (_data, { groupId }) => {
       refresh(groupId);
     },
   });
 }
 
-type GroupAction =
-  | "skipCurrentTurn"
-  | "pauseGroup"
-  | "resumeGroup"
-  | "stopGroup";
+type GroupAction = "skip" | "pause" | "resume" | "stop";
+
+const groupActionFns: Record<GroupAction, (id: GroupId) => Promise<void>> = {
+  skip: apiSkipCurrentTurn,
+  pause: apiPauseGroup,
+  resume: apiResumeGroup,
+  stop: apiStopGroup,
+};
 
 function useGroupAction(action: GroupAction) {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
   return useMutation<void, Error, GroupId>({
-    mutationFn: async (groupId) => {
-      if (!actor) throw new Error("Backend is not ready");
-      await actor[action](groupId);
-    },
+    mutationFn: (groupId) => groupActionFns[action](groupId),
     onSuccess: (_data, groupId) => {
       refresh(groupId);
     },
@@ -125,29 +114,25 @@ function useGroupAction(action: GroupAction) {
 }
 
 export function useSkipTurn() {
-  return useGroupAction("skipCurrentTurn");
+  return useGroupAction("skip");
 }
 
 export function usePauseGroup() {
-  return useGroupAction("pauseGroup");
+  return useGroupAction("pause");
 }
 
 export function useResumeGroup() {
-  return useGroupAction("resumeGroup");
+  return useGroupAction("resume");
 }
 
 export function useStopGroup() {
-  return useGroupAction("stopGroup");
+  return useGroupAction("stop");
 }
 
 export function useSetTurnMode() {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
   return useMutation<void, Error, { groupId: GroupId; mode: TurnMode }>({
-    mutationFn: async ({ groupId, mode }) => {
-      if (!actor) throw new Error("Backend is not ready");
-      await actor.setTurnMode(groupId, mode);
-    },
+    mutationFn: ({ groupId, mode }) => apiSetTurnMode(groupId, mode),
     onSuccess: (_data, { groupId }) => {
       refresh(groupId);
     },
@@ -155,13 +140,9 @@ export function useSetTurnMode() {
 }
 
 export function useSetMaxTurns() {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
-  return useMutation<void, Error, { groupId: GroupId; maxTurns: bigint }>({
-    mutationFn: async ({ groupId, maxTurns }) => {
-      if (!actor) throw new Error("Backend is not ready");
-      await actor.setMaxTurns(groupId, maxTurns);
-    },
+  return useMutation<void, Error, { groupId: GroupId; maxTurns: number }>({
+    mutationFn: ({ groupId, maxTurns }) => apiSetMaxTurns(groupId, maxTurns),
     onSuccess: (_data, { groupId }) => {
       refresh(groupId);
     },
@@ -169,13 +150,10 @@ export function useSetMaxTurns() {
 }
 
 export function useAddMember() {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
   return useMutation<void, Error, { groupId: GroupId } & MemberInput>({
-    mutationFn: async ({ groupId, name, roleTitle, accentColor, isMock }) => {
-      if (!actor) throw new Error("Backend is not ready");
-      await actor.addMember(groupId, name, roleTitle, accentColor, isMock);
-    },
+    mutationFn: ({ groupId, name, roleTitle, accentColor, isMock }) =>
+      apiAddMember(groupId, { name, roleTitle, accentColor, isMock }),
     onSuccess: (_data, { groupId }) => {
       refresh(groupId);
     },
@@ -183,13 +161,19 @@ export function useAddMember() {
 }
 
 export function useRemoveMember() {
-  const { actor } = useActor(createActor);
   const refresh = useRefreshGroups();
   return useMutation<void, Error, { groupId: GroupId; botId: string }>({
-    mutationFn: async ({ groupId, botId }) => {
-      if (!actor) throw new Error("Backend is not ready");
-      await actor.removeMember(groupId, botId);
+    mutationFn: ({ groupId, botId }) => apiRemoveMember(groupId, botId),
+    onSuccess: (_data, { groupId }) => {
+      refresh(groupId);
     },
+  });
+}
+
+export function useRotateMemberToken() {
+  const refresh = useRefreshGroups();
+  return useMutation<string, Error, { groupId: GroupId; botId: string }>({
+    mutationFn: ({ groupId, botId }) => rotateMemberToken(groupId, botId),
     onSuccess: (_data, { groupId }) => {
       refresh(groupId);
     },

@@ -1,4 +1,4 @@
-import { type Message, MessageRole, type RoomState } from "@/backend";
+import { type Message, MessageRole, type RoomState } from "@/lib/api";
 
 const MAX_MESSAGES = 15;
 

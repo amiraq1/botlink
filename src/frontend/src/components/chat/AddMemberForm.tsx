@@ -14,7 +14,7 @@ export default function AddMemberForm({
   memberCount,
   usedColors,
 }: {
-  groupId: bigint;
+  groupId: number;
   memberCount: number;
   usedColors: string[];
 }) {

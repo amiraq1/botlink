@@ -1,4 +1,4 @@
-import type { GroupDetail } from "@/backend";
+import type { GroupDetail } from "@/lib/api";
 import AddMemberForm from "@/components/chat/AddMemberForm";
 import {
   ControlsSection,

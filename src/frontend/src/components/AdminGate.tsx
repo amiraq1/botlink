@@ -1,11 +1,12 @@
-import { RequireSignIn } from "@/components/InternetIdentity";
 import Layout from "@/components/Layout";
 import LogoutButton from "@/components/LogoutButton";
 import { Button } from "@/components/ui/button";
-import { useIsAdmin } from "@/hooks/useAdminQueries";
-import { useInternetIdentity } from "@caffeineai/core-infrastructure";
-import { Loader2, ShieldAlert } from "lucide-react";
-import { type ReactNode, useLayoutEffect } from "react";
+import { Input } from "@/components/ui/input";
+import { authKey, useIsAdmin } from "@/hooks/useAdminQueries";
+import { login } from "@/lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { Loader2 } from "lucide-react";
+import { type FormEvent, type ReactNode, useLayoutEffect, useState } from "react";
 
 /**
  * Applies the dark RTL Arabic admin look to the document while the admin shell
@@ -72,32 +73,72 @@ function LoadingPanel({ label }: { label: string }) {
   );
 }
 
+/** Password login for the single admin (ADMIN_PASSWORD on the server). */
 function LoginPrompt() {
-  const { login, isLoginError, isLoggingIn, isInitializing } =
-    useInternetIdentity();
+  const queryClient = useQueryClient();
+  const [password, setPassword] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (password.length === 0 || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await login(password);
+      setPassword("");
+      await queryClient.invalidateQueries({ queryKey: authKey });
+    } catch (err) {
+      setError(
+        err instanceof Error && err.message.includes("not configured")
+          ? "تسجيل الدخول غير مفعّل على الخادم: حدّد ADMIN_PASSWORD أولاً."
+          : "كلمة المرور غير صحيحة. حاول مرة أخرى.",
+      );
+    } finally {
+      setPending(false);
+    }
+  };
+
   return (
     <CenteredPanel
       ocid="auth.panel"
-      title="دخول المشرف"
-      description="سجّل الدخول بهوية الإنترنت لإدارة مجموعات البوتات ومتابعة محادثاتها."
+      title="تسجيل دخول المشرف"
+      description="أدخل كلمة مرور المشرف لإدارة مجموعات البوتات ومتابعة محادثاتها."
     >
-      <Button
-        type="button"
-        size="lg"
-        data-ocid="auth.login_button"
-        className="rounded-full px-8"
-        disabled={isInitializing || isLoggingIn}
-        onClick={() => login()}
+      <form
+        onSubmit={handleSubmit}
+        className="flex w-full max-w-xs flex-col gap-3"
       >
-        {isLoggingIn ? "جارٍ تسجيل الدخول…" : "تسجيل الدخول"}
-      </Button>
-      {isLoginError && (
+        <Input
+          type="password"
+          dir="ltr"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="كلمة المرور"
+          autoComplete="current-password"
+          aria-label="كلمة مرور المشرف"
+          data-ocid="auth.password_input"
+          disabled={pending}
+          className="admin-input h-12 text-center"
+        />
+        <Button
+          type="submit"
+          size="lg"
+          data-ocid="auth.login_button"
+          className="rounded-full px-8"
+          disabled={pending || password.length === 0}
+        >
+          {pending ? "جارٍ تسجيل الدخول…" : "تسجيل الدخول"}
+        </Button>
+      </form>
+      {error && (
         <p
           role="alert"
           data-ocid="auth.error_state"
           className="text-sm text-destructive"
         >
-          لم يكتمل تسجيل الدخول. حاول مرة أخرى.
+          {error}
         </p>
       )}
     </CenteredPanel>
@@ -107,64 +148,46 @@ function LoginPrompt() {
 function AdminCheck({ children }: { children: ReactNode }) {
   const { data: isAdmin, isLoading, isError, refetch } = useIsAdmin();
 
-  if (isLoading || (isAdmin === undefined && !isError)) {
+  if (isLoading || isAdmin === undefined) {
+    if (isError) {
+      return (
+        <CenteredPanel
+          ocid="auth.error_state"
+          title="تعذّر التحقق من الصلاحية"
+          description="لم يستجب الخادم. تحقق من الاتصال ثم حاول مرة أخرى."
+        >
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              data-ocid="auth.retry_button"
+              className="rounded-full"
+              onClick={() => void refetch()}
+            >
+              إعادة المحاولة
+            </Button>
+            <LogoutButton />
+          </div>
+        </CenteredPanel>
+      );
+    }
     return <LoadingPanel label="جارٍ التحقق من الصلاحية…" />;
   }
-  if (isError) {
-    return (
-      <CenteredPanel
-        ocid="auth.error_state"
-        title="تعذّر التحقق من الصلاحية"
-        description="لم يستجب الخادم. تحقق من الاتصال ثم حاول مرة أخرى."
-      >
-        <div className="flex gap-2">
-          <Button
-            type="button"
-            data-ocid="auth.retry_button"
-            className="rounded-full"
-            onClick={() => void refetch()}
-          >
-            إعادة المحاولة
-          </Button>
-          <LogoutButton />
-        </div>
-      </CenteredPanel>
-    );
-  }
   if (!isAdmin) {
-    return (
-      <CenteredPanel
-        ocid="auth.access_denied_state"
-        title="الوصول مرفوض"
-        description="هذا الحساب ليس مشرف BOTLINK."
-      >
-        <ShieldAlert aria-hidden="true" className="size-8 text-destructive" />
-        <LogoutButton />
-      </CenteredPanel>
-    );
+    return <LoginPrompt />;
   }
   return <Layout>{children}</Layout>;
 }
 
-/** Wraps admin routes: signed-out sees login, non-admin is denied, admin sees the page in Layout. */
+/** Wraps admin routes: signed-out sees the password login, admin sees the page in Layout. */
 export default function AdminGate({ children }: { children: ReactNode }) {
   useAdminDocumentMode();
-  const { isInitializing, isLoggingIn } = useInternetIdentity();
   return (
     <div
       dir="rtl"
       lang="ar"
       className="admin-shell min-h-dvh bg-background text-foreground"
     >
-      {isInitializing || isLoggingIn ? (
-        <LoadingPanel
-          label={isLoggingIn ? "جارٍ تسجيل الدخول…" : "جارٍ التحميل…"}
-        />
-      ) : (
-        <RequireSignIn fallback={<LoginPrompt />}>
-          <AdminCheck>{children}</AdminCheck>
-        </RequireSignIn>
-      )}
+      <AdminCheck>{children}</AdminCheck>
     </div>
   );
 }

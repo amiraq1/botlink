@@ -1,4 +1,4 @@
-import { type GroupDetail, GroupStatus } from "@/backend";
+import { type GroupDetail, GroupStatus } from "@/lib/api";
 import type { GroupControls } from "@/components/chat/useGroupControls";
 import { useSkipTurn } from "@/hooks/useAdminQueries";
 import { accentClass, clampTurn, formatNumberAr } from "@/lib/convert";

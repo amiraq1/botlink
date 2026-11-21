@@ -1,4 +1,4 @@
-import type { RoomState } from "@/backend";
+import type { RoomState } from "@/lib/api";
 import {
   type RoomStatusKey,
   STATUS_ACTION,

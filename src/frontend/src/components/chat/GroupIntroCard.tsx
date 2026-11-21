@@ -1,4 +1,4 @@
-import type { GroupDetail } from "@/backend";
+import type { GroupDetail } from "@/lib/api";
 import BotAvatar from "@/components/chat/BotAvatar";
 import { isMemberOnline } from "@/lib/convert";
 import { Info } from "lucide-react";

@@ -1,4 +1,4 @@
-import { type Message, MessageRole } from "@/backend";
+import { type Message, MessageRole } from "@/lib/api";
 import BotAvatar from "@/components/chat/BotAvatar";
 import { accentClass, formatClockAr } from "@/lib/convert";
 import { cn } from "@/lib/utils";
