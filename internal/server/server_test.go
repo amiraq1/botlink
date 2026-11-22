@@ -231,6 +231,45 @@ func TestClientIPTrustBoundaries(t *testing.T) {
 	}
 }
 
+func TestSecureCookieRequiresTrustedProxy(t *testing.T) {
+	srv, _ := newTestServer(t, "secret123")
+	srv.trustedProxies = parseCIDRs([]string{"127.0.0.1/32"})
+
+	req := httptest.NewRequest("POST", "/api/auth/login", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	srv.setSessionCookie(w, req, "value")
+	if cookies := w.Result().Cookies(); len(cookies) != 1 || cookies[0].Secure {
+		t.Fatalf("untrusted peer cookie Secure = %v; want false", cookies)
+	}
+
+	// On Fly the edge is always trusted, so Fly-Client-IP plus XFP must keep Secure.
+	srv.trustedProxyHeader = "Fly-Client-IP"
+	srv.trustHeaderAlways = true
+	req.Header.Set("Fly-Client-IP", "198.51.100.7")
+	w = httptest.NewRecorder()
+	srv.setSessionCookie(w, req, "value")
+	if cookies := w.Result().Cookies(); len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("trusted Fly edge cookie Secure = %v; want true", cookies)
+	}
+}
+
+func TestConstantTimeEqual(t *testing.T) {
+	if !constantTimeEqual("same", "same") {
+		t.Fatal("equal passwords must match")
+	}
+	if constantTimeEqual("a", "a longer password") {
+		t.Fatal("different-length passwords must not match")
+	}
+	if constantTimeEqual("abc", "abd") {
+		t.Fatal("same-length different passwords must not match")
+	}
+	if !constantTimeEqual("", "") {
+		t.Fatal("empty passwords must match")
+	}
+}
+
 func TestRoomRateLimitAndRetryAfter(t *testing.T) {
 	srv, st := newTestServer(t, "secret123")
 	id, err := st.CreateGroup(context.Background(), store.CreateGroupInput{

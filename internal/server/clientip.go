@@ -57,11 +57,18 @@ func normalizeIP(s string) net.IP {
 	return net.ParseIP(s)
 }
 
+// trustedPeer reports whether the immediate connection comes from a
+// configured proxy. Shared by clientIP and secureRequest so header trust is
+// decided the same way in both places.
+func (s *Server) trustedPeer(r *http.Request) bool {
+	return ipInNets(normalizeIP(r.RemoteAddr), s.trustedProxies)
+}
+
 // clientIP only trusts forwarding headers when the immediate peer is a
 // configured proxy. The first X-Forwarded-For element is never used.
 func (s *Server) clientIP(r *http.Request) string {
 	peer := normalizeIP(r.RemoteAddr)
-	peerTrusted := ipInNets(peer, s.trustedProxies)
+	peerTrusted := s.trustedPeer(r)
 
 	if s.trustedProxyHeader != "" && (peerTrusted || s.trustHeaderAlways) {
 		if ip := normalizeIP(r.Header.Get(s.trustedProxyHeader)); ip != nil {

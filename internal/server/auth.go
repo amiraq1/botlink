@@ -64,11 +64,19 @@ func verifySessionToken(secret []byte, token string, now time.Time) (string, boo
 	return sessionID, true
 }
 
-func secureRequest(r *http.Request) bool {
-	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+// secureRequest only believes X-Forwarded-Proto when it came from a trusted
+// proxy (or from the Fly edge, where trustHeaderAlways is enabled).
+func (s *Server) secureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if !s.trustedPeer(r) && !s.trustHeaderAlways {
+		return false
+	}
+	return r.Header.Get("X-Forwarded-Proto") == "https"
 }
 
-func setSessionCookie(w http.ResponseWriter, r *http.Request, value string) {
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, value string) {
 	c := &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    value,
@@ -76,12 +84,12 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, value string) {
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   secureRequest(r),
+		Secure:   s.secureRequest(r),
 	}
 	http.SetCookie(w, c)
 }
 
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (s *Server) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -89,7 +97,7 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   secureRequest(r),
+		Secure:   s.secureRequest(r),
 	})
 }
 
@@ -105,16 +113,12 @@ func (s *Server) isAuthenticated(r *http.Request) bool {
 	return s.store.IsAdminSessionValid(r.Context(), id, time.Now().UnixMilli())
 }
 
-// constantTimeEqual compares the supplied password with the configured admin
-// password in constant time.
+// constantTimeEqual compares SHA-256 hashes of both inputs so neither the
+// contents nor the length of the configured password affects timing.
 func constantTimeEqual(a, b string) bool {
-	if len(a) != len(b) {
-		// Still hash both sides so the timing does not leak the length alone.
-		ha := sha256.Sum256([]byte(a))
-		hb := sha256.Sum256([]byte(b))
-		return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1 && false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 // GenerateEphemeralSecret creates a fresh 32-byte session secret for dev

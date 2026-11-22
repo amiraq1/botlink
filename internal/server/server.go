@@ -285,7 +285,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.handleStoreErr(w, err)
 		return
 	}
-	setSessionCookie(w, r, newSessionToken(s.sessionSecret, sessionID, now))
+	s.setSessionCookie(w, r, newSessionToken(s.sessionSecret, sessionID, now))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -295,7 +295,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 			_ = s.store.RevokeAdminSession(r.Context(), id, nowMs())
 		}
 	}
-	clearSessionCookie(w, r)
+	s.clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

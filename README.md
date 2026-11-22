@@ -98,24 +98,33 @@ Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + 
    in `railway.json`, healthcheck path `/healthz`).
 2. Add a **Volume** mounted at `/data`.
 3. Set variables: `DB_PATH=/data/botlink.db`, `ADMIN_PASSWORD=<strong password>`,
-   `SESSION_SECRET=<long random string>`. Railway sets `PORT` automatically.
-4. Deploy. The container serves the API + frontend on `$PORT` with the
-   database persisted on the volume.
+   `SESSION_SECRET=<long random string>`, and `APP_ENV=production` so the
+   startup checks fail fast if either credential is missing. Railway sets
+   `PORT` automatically.
+4. If the app is behind a proxy that forwards `X-Forwarded-For`, set
+   `TRUSTED_PROXIES` explicitly to that proxy's CIDR(s); never trust the first
+   XFF element. Deploy. The container serves the API + frontend on `$PORT`
+   with the database persisted on the volume.
 
 ## Self-host deployment (Docker Compose)
 
 For a server you control (e.g. an Ubuntu VM with Docker):
 
 1. Install Docker + the Compose plugin, then clone this repo.
-2. `cp .env.example .env` and set `ADMIN_PASSWORD` and `SESSION_SECRET`
-   (generate the secret with `openssl rand -hex 32`).
-3. `docker compose up -d --build` — the app serves API + frontend on
-   `http://<server-ip>:8080`, with the SQLite database in `./data/botlink.db`.
-4. For HTTPS on a public domain: point a DNS A record at the server, set
+2. `cp .env.example .env` and set `ADMIN_PASSWORD`, `SESSION_SECRET`
+   (generate the secret with `openssl rand -hex 32`), and
+   `APP_ENV=production`.
+3. Set `TRUSTED_PROXIES` explicitly (for example the Caddy container's IP or
+   network, or loopback only). Do **not** publish port 8080 directly in
+   production — the direct `:8080` exposure is for local development only.
+4. `docker compose up -d --build` — the app serves API + frontend with the
+   SQLite database in `./data/botlink.db`.
+5. For HTTPS on a public domain: point a DNS A record at the server, set
    `BOTLINK_DOMAIN=<domain>` in `.env`, then
-   `docker compose --profile https up -d --build` (Caddy terminates TLS).
-5. Check `http://<server-ip>:8080/healthz` (should print `ok`), then open
-   `/admin` and sign in with `ADMIN_PASSWORD`.
+   `docker compose --profile https up -d --build` (Caddy terminates TLS and is
+   the only public entry point).
+6. Check `/healthz` (should print `ok`), then open `/admin` and sign in with
+   `ADMIN_PASSWORD`.
 
 Back up `./data/botlink.db` — it is the whole database.
 
