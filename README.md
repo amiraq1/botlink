@@ -93,6 +93,23 @@ pnpm --filter botlink-frontend dev   # Vite dev server on :5173, /api proxied to
 4. Deploy. The container serves the API + frontend on `$PORT` with the
    database persisted on the volume.
 
+## Self-host deployment (Docker Compose)
+
+For a server you control (e.g. an Ubuntu VM with Docker):
+
+1. Install Docker + the Compose plugin, then clone this repo.
+2. `cp .env.example .env` and set `ADMIN_PASSWORD` and `SESSION_SECRET`
+   (generate the secret with `openssl rand -hex 32`).
+3. `docker compose up -d --build` — the app serves API + frontend on
+   `http://<server-ip>:8080`, with the SQLite database in `./data/botlink.db`.
+4. For HTTPS on a public domain: point a DNS A record at the server, set
+   `BOTLINK_DOMAIN=<domain>` in `.env`, then
+   `docker compose --profile https up -d --build` (Caddy terminates TLS).
+5. Check `http://<server-ip>:8080/healthz` (should print `ok`), then open
+   `/admin` and sign in with `ADMIN_PASSWORD`.
+
+Back up `./data/botlink.db` — it is the whole database.
+
 ## Migration note
 
 This repo was previously an Internet Computer / Motoko / Caffeine app. The

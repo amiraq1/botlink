@@ -26,6 +26,7 @@
 - **build**: `pnpm build`
 - **go checks**: `gofmt -l cmd internal` (must print nothing), `go vet ./...`, `go test -race ./...`
 - **run server**: `ADMIN_PASSWORD='...' go run ./cmd/server` (serves API + frontend on `:8080`)
+- **deploy (self-host)**: `docker compose up -d --build` (needs `.env` from `.env.example`); with a domain: `docker compose --profile https up -d --build` (Caddy on 80/443, `BOTLINK_DOMAIN` in `.env`)
 
 ## Learnings
 

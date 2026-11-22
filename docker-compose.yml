@@ -1,0 +1,58 @@
+# BOTLINK — self-hosted deployment (Docker Compose)
+#
+# Usage:
+#   1. cp .env.example .env   # then set ADMIN_PASSWORD + SESSION_SECRET
+#   2. docker compose up -d --build
+#      -> app on http://<server-ip>:8080 (API + frontend, DB in ./data)
+#
+# With a public domain (HTTPS via Caddy):
+#   1. Point a DNS A record at this server's public IP, e.g. botlink.example.com
+#   2. Set BOTLINK_DOMAIN=botlink.example.com in .env
+#   3. docker compose --profile https up -d --build
+#      -> https://botlink.example.com (Caddy terminates TLS automatically)
+#
+# The database is a single SQLite file at ./data/botlink.db — back it up.
+
+services:
+  botlink:
+    build: .
+    env_file:
+      - .env
+    environment:
+      # Defaults; override in .env
+      PORT: ${PORT:-8080}
+      DB_PATH: ${DB_PATH:-/data/botlink.db}
+      FRONTEND_DIST_DIR: /app/frontend/dist
+    volumes:
+      - ./data:/data
+    ports:
+      - "${PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  caddy:
+    profiles:
+      - https
+    image: caddy:2-alpine
+    env_file:
+      - .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      botlink:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

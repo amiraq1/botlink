@@ -1,0 +1,6 @@
+# BOTLINK — Caddy reverse proxy (only used with the "https" compose profile).
+# Set BOTLINK_DOMAIN in .env to a domain whose DNS A record points at this
+# server; Caddy issues and renews the TLS certificate automatically.
+{$BOTLINK_DOMAIN} {
+	reverse_proxy botlink:8080
+}
