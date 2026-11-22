@@ -18,6 +18,7 @@ func TestSanitize(t *testing.T) {
 		{"bracketed link", "see [https://example.com] ok", "see [LINK_REMOVED] ok"},
 		{"control chars", "a\x00b\x07c", "abc"},
 		{"bidi + zero width", "a\u202e b\u200b c", "a b c"},
+		{"variation selectors", "a\ufe0f b\U000e0100 c\uffa0 d\u3164", "a b c d"},
 		{"tab becomes space", "a\tb", "a b"},
 		{"newline kept", "a\nb", "a\nb"},
 		{"trimmed", "  hello  ", "hello"},

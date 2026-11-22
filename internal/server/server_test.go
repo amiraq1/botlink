@@ -205,3 +205,85 @@ func TestRoomNeverLeaksTokensOverHTTP(t *testing.T) {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+func TestClientIPTrustBoundaries(t *testing.T) {
+	srv, _ := newTestServer(t, "secret123")
+	srv.trustedProxies = parseCIDRs([]string{"127.0.0.1/32"})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	req.RemoteAddr = "203.0.113.10:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
+	if got := srv.clientIP(req); got != "203.0.113.10" {
+		t.Fatalf("untrusted peer clientIP = %q; want RemoteAddr", got)
+	}
+
+	req = httptest.NewRequest("GET", "/healthz", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
+	if got := srv.clientIP(req); got != "5.6.7.8" {
+		t.Fatalf("trusted peer clientIP = %q; want rightmost untrusted hop", got)
+	}
+
+	srv.trustedProxyHeader = "Fly-Client-IP"
+	req.Header.Set("Fly-Client-IP", "198.51.100.7")
+	if got := srv.clientIP(req); got != "198.51.100.7" {
+		t.Fatalf("trusted header clientIP = %q; want Fly-Client-IP", got)
+	}
+}
+
+func TestRoomRateLimitAndRetryAfter(t *testing.T) {
+	srv, st := newTestServer(t, "secret123")
+	id, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
+		Name: "G", TurnMode: "auto_round_robin", MaxTurns: 20,
+		Members: []store.MemberInput{{Name: "A"}, {Name: "B"}},
+	}, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie := login(t, srv)
+	rec := doReq(t, srv, "GET", "/api/admin/groups/"+itoa(id), nil, cookie)
+	var detail store.GroupDetail
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	token := detail.Members[0].AgentToken
+
+	statuses := make([]int, 0, 61)
+	var retry string
+	for i := 0; i < 61; i++ {
+		req := httptest.NewRequest("GET", "/api/room/"+token, nil)
+		req.RemoteAddr = "198.51.100.20:1234"
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		statuses = append(statuses, w.Code)
+		retry = w.Header().Get("Retry-After")
+	}
+	if statuses[0] != 200 || statuses[59] != 200 || statuses[60] != 429 {
+		t.Fatalf("room GET statuses: first=%d 60th=%d 61st=%d", statuses[0], statuses[59], statuses[60])
+	}
+	if retry == "" {
+		t.Fatal("429 response missing Retry-After")
+	}
+}
+
+func TestSessionRevocation(t *testing.T) {
+	srv, _ := newTestServer(t, "secret123")
+	a := login(t, srv)
+	b := login(t, srv)
+
+	if rec := doReq(t, srv, "GET", "/api/admin/groups", nil, a); rec.Code != 200 {
+		t.Fatalf("session A before logout = %d", rec.Code)
+	}
+	if rec := doReq(t, srv, "POST", "/api/auth/logout", nil, a); rec.Code != 200 {
+		t.Fatalf("logout = %d", rec.Code)
+	}
+	if rec := doReq(t, srv, "GET", "/api/admin/groups", nil, a); rec.Code != 401 {
+		t.Fatalf("replayed session after logout = %d; want 401", rec.Code)
+	}
+	if rec := doReq(t, srv, "POST", "/api/admin/sessions/revoke-all", nil, b); rec.Code != 200 {
+		t.Fatalf("revoke-all = %d", rec.Code)
+	}
+	if rec := doReq(t, srv, "GET", "/api/admin/groups", nil, b); rec.Code != 401 {
+		t.Fatalf("session B after revoke-all = %d; want 401", rec.Code)
+	}
+}

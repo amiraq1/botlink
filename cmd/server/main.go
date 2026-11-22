@@ -6,9 +6,12 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -34,15 +37,52 @@ func main() {
 	secretStr := os.Getenv("SESSION_SECRET")
 	ephemeral := false
 	var secret []byte
+	production := os.Getenv("FLY_APP_NAME") != "" || os.Getenv("APP_ENV") == "production"
 	if secretStr == "" {
-		secret, _ = server.GenerateEphemeralSecret()
+		generated, err := server.GenerateEphemeralSecret()
+		if err != nil {
+			logger.Fatalf("generate session secret: %v", err)
+		}
+		if production {
+			logger.Fatal("SESSION_SECRET is required in production")
+		}
+		secret = generated
 		ephemeral = true
 		logger.Println("WARNING: SESSION_SECRET is not set — using an ephemeral random secret; admin sessions will not survive restarts. Set SESSION_SECRET in production.")
 	} else {
+		if production && len(secretStr) < 32 {
+			logger.Fatal("SESSION_SECRET must be at least 32 characters in production")
+		}
 		secret = []byte(secretStr)
 	}
 	if adminPassword == "" {
+		if production {
+			logger.Fatal("ADMIN_PASSWORD is required in production")
+		}
 		logger.Println("WARNING: ADMIN_PASSWORD is not set — admin login is disabled until it is set.")
+	}
+
+	if raw := os.Getenv("MAX_TURNS_LIMIT"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n >= 1 {
+			store.SetMaxTurnsLimit(n)
+		} else {
+			logger.Fatal("MAX_TURNS_LIMIT must be a positive integer")
+		}
+	}
+	if raw := os.Getenv("MESSAGE_RETENTION"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 100 {
+			logger.Fatal("MESSAGE_RETENTION must be at least 100")
+		}
+		store.SetMessageRetention(n)
+	}
+	turnTimeoutSec := int64(store.DefaultTurnTimeoutSec)
+	if raw := os.Getenv("TURN_TIMEOUT_SEC"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 1 {
+			logger.Fatal("TURN_TIMEOUT_SEC must be a positive integer")
+		}
+		turnTimeoutSec = n
 	}
 
 	st, err := store.Open(dbPath)
@@ -51,6 +91,19 @@ func main() {
 	}
 	defer st.Close()
 
+	trustedHeader := os.Getenv("TRUSTED_PROXY_HEADER")
+	trustAlways := false
+	if os.Getenv("FLY_APP_NAME") != "" && trustedHeader == "" {
+		trustedHeader = "Fly-Client-IP"
+		// Fly always terminates TLS in front of the app, so its header can
+		// be trusted even when the proxy peer is outside our CIDR list.
+		trustAlways = true
+	}
+	var trustedProxies []*net.IPNet
+	if raw := os.Getenv("TRUSTED_PROXIES"); raw != "" {
+		trustedProxies = server.ParseCIDRs(strings.Split(raw, ","))
+	}
+
 	srv := server.New(server.Config{
 		Addr:                   ":" + port,
 		DBPath:                 dbPath,
@@ -58,11 +111,16 @@ func main() {
 		AdminPassword:          adminPassword,
 		SessionSecret:          secret,
 		SessionSecretEphemeral: ephemeral,
+		TrustedProxyHeader:     trustedHeader,
+		TrustedProxies:         trustedProxies,
+		TrustHeaderAlways:      trustAlways,
+		TurnTimeoutSec:         turnTimeoutSec,
 	}, st)
+	st.SetTurnTimeout(turnTimeoutSec)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go srv.StartMockSweeper(ctx)
+	go srv.StartTurnSweeper(ctx)
 
 	httpServer := &http.Server{
 		Addr:         ":" + port,

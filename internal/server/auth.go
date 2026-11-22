@@ -18,57 +18,70 @@ const (
 	sessionTTL        = 7 * 24 * time.Hour
 )
 
-// newSessionToken returns a signed session value: base64url(expiryUnix) + "."
-// + base64url(HMAC-SHA256(secret, "botlink-admin-session|<expiryUnix>")).
-func newSessionToken(secret []byte, now time.Time) string {
+// newSessionToken returns base64url(expiry) + "." + base64url(sessionID) +
+// "." + base64url(HMAC-SHA256(secret, "botlink-admin-session|exp|id")).
+// The id lets logout revoke the session in the database.
+func newSessionToken(secret []byte, sessionID string, now time.Time) string {
 	exp := now.Add(sessionTTL).Unix()
-	payload := "botlink-admin-session|" + strconv.FormatInt(exp, 10)
+	payload := "botlink-admin-session|" + strconv.FormatInt(exp, 10) + "|" + sessionID
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(payload))
-	sig := mac.Sum(nil)
 	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(exp, 10))) +
-		"." + base64.RawURLEncoding.EncodeToString(sig)
+		"." + base64.RawURLEncoding.EncodeToString([]byte(sessionID)) +
+		"." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func verifySessionToken(secret []byte, token string, now time.Time) bool {
+// verifySessionToken checks the signature and expiry and returns the session
+// id for the database revocation check.
+func verifySessionToken(secret []byte, token string, now time.Time) (string, bool) {
 	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
-		return false
+	if len(parts) != 3 {
+		return "", false
 	}
 	expBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return false
+		return "", false
 	}
-	sig, err := base64.RawURLEncoding.DecodeString(parts[1])
+	idBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return false
+		return "", false
+	}
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "", false
 	}
 	exp, err := strconv.ParseInt(string(expBytes), 10, 64)
 	if err != nil || exp <= now.Unix() {
-		return false
+		return "", false
 	}
-	payload := "botlink-admin-session|" + strconv.FormatInt(exp, 10)
+	sessionID := string(idBytes)
+	payload := "botlink-admin-session|" + strconv.FormatInt(exp, 10) + "|" + sessionID
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(payload))
-	expected := mac.Sum(nil)
-	return subtle.ConstantTimeCompare(sig, expected) == 1
+	if subtle.ConstantTimeCompare(sig, mac.Sum(nil)) != 1 {
+		return "", false
+	}
+	return sessionID, true
 }
 
-func setSessionCookie(w http.ResponseWriter, r *http.Request, secret []byte, now time.Time) {
-	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+func secureRequest(r *http.Request) bool {
+	return r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, value string) {
 	c := &http.Cookie{
 		Name:     sessionCookieName,
-		Value:    newSessionToken(secret, now),
+		Value:    value,
 		Path:     "/",
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   secure,
+		Secure:   secureRequest(r),
 	}
 	http.SetCookie(w, c)
 }
 
-func clearSessionCookie(w http.ResponseWriter) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -76,6 +89,7 @@ func clearSessionCookie(w http.ResponseWriter) {
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secureRequest(r),
 	})
 }
 
@@ -84,7 +98,11 @@ func (s *Server) isAuthenticated(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return verifySessionToken(s.sessionSecret, c.Value, time.Now())
+	id, ok := verifySessionToken(s.sessionSecret, c.Value, time.Now())
+	if !ok {
+		return false
+	}
+	return s.store.IsAdminSessionValid(r.Context(), id, time.Now().UnixMilli())
 }
 
 // constantTimeEqual compares the supplied password with the configured admin

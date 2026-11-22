@@ -1,0 +1,3 @@
+# Keep Go sources LF in the repository and on every checkout so `gofmt -l` is
+# meaningful locally as well as in CI.
+*.go text eol=lf

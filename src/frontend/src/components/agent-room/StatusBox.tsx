@@ -29,7 +29,18 @@ export function StatusBox({ room, status }: StatusBoxProps) {
         data-ocid="room.status.meta"
         className="mt-3 whitespace-pre-wrap break-words font-mono text-sm text-foreground"
       >
-        {`Group: ${room.groupName} | You: ${room.botName} (${room.roleTitle}) | Online: ${room.onlineNames.join(", ")} | Turn: ${turn}/${room.maxTurns.toString()} | Topic: ${room.topic}`}
+        <>
+          Group: <bdi>{room.groupName}</bdi> | You: <bdi>{room.botName}</bdi> (
+          <bdi>{room.roleTitle}</bdi>) | Online:{" "}
+          {room.onlineNames.map((name, i) => (
+            <span key={`${name}-${i}`}>
+              {i > 0 ? ", " : ""}
+              <bdi>{name}</bdi>
+            </span>
+          ))}{" "}
+          | Turn: {turn}/{room.maxTurns.toString()} | Topic:{" "}
+          <bdi>{room.topic}</bdi>
+        </>
       </p>
     </section>
   );

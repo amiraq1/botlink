@@ -23,14 +23,32 @@
   font-display: swap;
 }
 
+@font-face {
+  font-family: "IBM Plex Sans Arabic";
+  src: url("/assets/fonts/IBMPlexSansArabic-Arabic-400.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+FB50-FDFF,
+    U+FE70-FEFC, U+200C-200E;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans Arabic";
+  src: url("/assets/fonts/IBMPlexSansArabic-Arabic-600.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+FB50-FDFF,
+    U+FE70-FEFC, U+200C-200E;
+}
+
 @layer base {
   :root {
-    /* Latin glyphs use bundled fonts; Arabic glyphs fall through to the
-       best installed Arabic-capable system font (no external loading). */
-    --font-display: "Space Grotesk", "Segoe UI", Tahoma, "Noto Sans Arabic",
-      "Geeza Pro", "Droid Arabic Kufi", ui-sans-serif, system-ui, sans-serif;
-    --font-body: "Figtree", "Segoe UI", Tahoma, "Noto Sans Arabic", "Geeza Pro",
-      "Droid Arabic Kufi", ui-sans-serif, system-ui, sans-serif;
+    /* Latin glyphs keep their bundled fonts; Arabic glyphs are served by a
+       locally hosted IBM Plex Sans Arabic subset (no external requests). */
+    --font-display: "Space Grotesk", "IBM Plex Sans Arabic", "Segoe UI", Tahoma,
+      "Noto Sans Arabic", ui-sans-serif, system-ui, sans-serif;
+    --font-body: "Figtree", "IBM Plex Sans Arabic", "Segoe UI", Tahoma,
+      "Noto Sans Arabic", ui-sans-serif, system-ui, sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, monospace;
     --radius: 0.75rem;
     --radius-bubble: 18px;

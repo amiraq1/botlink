@@ -4,9 +4,47 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"unicode"
 )
 
 // This file ports the turn engine of lib/groups.mo and lib/rooms.mo.
+
+// isMentionBoundary treats whitespace and most punctuation as separators so
+// "@Ali" never matches "@Ali2". Hyphen and underscore stay inside a name:
+// "@Ali-2" and "@Ali_X" must not match a member named "Ali".
+func isMentionBoundary(r rune) bool {
+	if r == '-' || r == '_' {
+		return false
+	}
+	return unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)
+}
+
+func mentionsMember(text, name string) bool {
+	if name == "" {
+		return false
+	}
+	target := []rune(strings.ToLower("@" + name))
+	rs := []rune(strings.ToLower(text))
+	for i := 0; i+len(target) <= len(rs); i++ {
+		matched := true
+		for j := range target {
+			if rs[i+j] != target[j] {
+				matched = false
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		beforeOK := i == 0 || isMentionBoundary(rs[i-1])
+		after := i + len(target)
+		afterOK := after == len(rs) || isMentionBoundary(rs[after])
+		if beforeOK && afterOK {
+			return true
+		}
+	}
+	return false
+}
 
 // nextAutoSpeaker returns the next speaker in circular order after `after`
 // (the speaker itself is skipped): the first online member; when nobody else
@@ -114,6 +152,27 @@ func advanceAfterReply(g *Group, ms []Member, nowMs int64) {
 	}
 }
 
+// advanceAfterSkip rotates the turn without consuming a turnSeq, so silent
+// bots never exhaust maxTurns or complete a group without any messages.
+func advanceAfterSkip(g *Group, ms []Member, nowMs int64) {
+	switch g.TurnMode {
+	case "auto_round_robin":
+		g.CurrentTurnBotID = nextAutoSpeaker(ms, g.CurrentTurnBotID, nowMs)
+		g.TurnQueue = []string{}
+	case "leader_round":
+		next, rest := popQueue(g.TurnQueue, ms)
+		if next != nil {
+			g.Status = "running"
+		} else {
+			g.Status = "waiting_for_leader"
+		}
+		g.CurrentTurnBotID = next
+		g.TurnQueue = rest
+	}
+	g.TurnStartedAt = nowMs
+	g.UpdatedAt = nowMs
+}
+
 // ---------------------------------------------------------------------------
 // Groups
 // ---------------------------------------------------------------------------
@@ -135,11 +194,11 @@ func (s *Store) CreateGroup(ctx context.Context, in CreateGroupInput, nowMs int6
 	}
 	var groupID int64
 	err := s.immediateTx(ctx, func(conn *sql.Conn) error {
-		name := capText(trimText(in.Name), 80)
+		name := capText(trimText(Sanitize(in.Name)), 80)
 		if name == "" {
 			name = DefaultGroupName
 		}
-		desc := capText(trimText(in.Description), 300)
+		desc := capText(trimText(Sanitize(in.Description)), 300)
 		if desc == "" {
 			desc = DefaultGroupDescription
 		}
@@ -147,6 +206,11 @@ func (s *Store) CreateGroup(ctx context.Context, in CreateGroupInput, nowMs int6
 		if maxTurns == 0 {
 			maxTurns = DefaultMaxTurns
 		}
+		validatedTurns, err := validateMaxTurns(maxTurns)
+		if err != nil {
+			return err
+		}
+		maxTurns = validatedTurns
 		mockDelay := DefaultMockDelaySec
 		if in.MockDelaySec != nil {
 			mockDelay = *in.MockDelaySec
@@ -163,7 +227,7 @@ func (s *Store) CreateGroup(ctx context.Context, in CreateGroupInput, nowMs int6
 			`INSERT INTO groups (name, description, topic, status, turn_mode, max_turns, turn_seq,
 			 current_turn_bot_id, turn_queue, mock_delay_sec, turn_started_at, created_at, updated_at)
 			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?, ?, ?)`,
-			name, desc, capText(trimText(in.Topic), 500), status, in.TurnMode, maxTurns,
+			name, desc, capText(trimText(Sanitize(in.Topic)), 500), status, in.TurnMode, maxTurns,
 			current, mockDelay, nowMs, nowMs, nowMs)
 		if err != nil {
 			return err
@@ -188,7 +252,7 @@ func (s *Store) CreateGroup(ctx context.Context, in CreateGroupInput, nowMs int6
 }
 
 func (s *Store) ListGroups(ctx context.Context, nowMs int64) ([]GroupSummary, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.ro.QueryContext(ctx,
 		`SELECT id, name, description, topic, status, turn_mode, turn_seq, max_turns, created_at, updated_at
 		 FROM groups ORDER BY updated_at DESC, id DESC`)
 	if err != nil {
@@ -212,7 +276,7 @@ func (s *Store) ListGroups(ctx context.Context, nowMs int64) ([]GroupSummary, er
 	}
 	// Member / online counts per group.
 	for i := range out {
-		ms, err := loadMembers(ctx, s.db, out[i].ID)
+		ms, err := loadMembers(ctx, s.ro, out[i].ID)
 		if err != nil {
 			return nil, err
 		}
@@ -228,21 +292,38 @@ func (s *Store) ListGroups(ctx context.Context, nowMs int64) ([]GroupSummary, er
 	return out, nil
 }
 
-// getGroupDetailTx loads a detail inside a transaction after applying a due
-// mock reply (mirrors the Motoko update-call behaviour).
-func (s *Store) getGroupDetailTx(ctx context.Context, conn *sql.Conn, id int64, nowMs int64) (*GroupDetail, error) {
-	if err := processDueMockTx(ctx, conn, id, nowMs); err != nil {
+// applyDueMockIfNeeded avoids a write transaction on the common polling
+// path: the cheap read-only check only upgrades to a write when a mock
+// reply is actually due.
+func (s *Store) applyDueMockIfNeeded(ctx context.Context, groupID, nowMs int64) error {
+	g, _, err := dueMockSpeaker(ctx, s.ro, groupID, nowMs)
+	if err != nil || g == nil {
+		return err
+	}
+	return s.ProcessDueMock(ctx, groupID, nowMs)
+}
+
+// GetGroupDetailPaged returns group state plus a bounded slice of messages.
+// beforeID loads older history, afterID returns only newer messages for
+// delta polling; both are capped at 200.
+func (s *Store) GetGroupDetailPaged(ctx context.Context, id, nowMs, beforeID, afterID, limit int64) (*GroupDetail, error) {
+	if err := s.applyDueMockIfNeeded(ctx, id, nowMs); err != nil {
 		return nil, err
 	}
-	g, err := loadGroup(ctx, conn, id)
+	g, err := loadGroup(ctx, s.ro, id)
 	if err != nil {
 		return nil, err
 	}
-	ms, err := loadMembers(ctx, conn, id)
+	ms, err := loadMembers(ctx, s.ro, id)
 	if err != nil {
 		return nil, err
 	}
-	msgs, err := loadMessages(ctx, conn, id)
+	// Normalize once so the page size used for HasMore is exactly the one
+	// passed to SQL (loadMessagesPage would otherwise clamp >200 internally).
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	msgs, err := loadMessagesPage(ctx, s.ro, id, beforeID, afterID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -250,23 +331,14 @@ func (s *Store) getGroupDetailTx(ctx context.Context, conn *sql.Conn, id int64, 
 	for i, m := range ms {
 		members[i] = m.withOnline(nowMs)
 	}
-	return &GroupDetail{Group: *g, Members: members, Messages: msgs}, nil
+	return &GroupDetail{
+		Group: *g, Members: members, Messages: msgs,
+		HasMore: len(msgs) >= int(limit),
+	}, nil
 }
 
 func (s *Store) GetGroupDetail(ctx context.Context, id int64, nowMs int64) (*GroupDetail, error) {
-	var detail *GroupDetail
-	err := s.immediateTx(ctx, func(conn *sql.Conn) error {
-		d, err := s.getGroupDetailTx(ctx, conn, id, nowMs)
-		if err != nil {
-			return err
-		}
-		detail = d
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return detail, nil
+	return s.GetGroupDetailPaged(ctx, id, nowMs, 0, 0, 100)
 }
 
 func (s *Store) SendLeaderMessage(ctx context.Context, groupID int64, rawText string, nowMs int64) error {
@@ -299,10 +371,9 @@ func (s *Store) SendLeaderMessage(ctx context.Context, groupID int64, rawText st
 			if err != nil {
 				return err
 			}
-			lowered := strings.ToLower(text)
 			var mentioned []Member
 			for _, m := range ms {
-				if m.Name != "" && strings.Contains(lowered, "@"+strings.ToLower(m.Name)) {
+				if mentionsMember(text, m.Name) {
 					mentioned = append(mentioned, m)
 				}
 			}
@@ -355,23 +426,7 @@ func (s *Store) SkipCurrentTurn(ctx context.Context, groupID int64, nowMs int64)
 		if err != nil {
 			return err
 		}
-		switch g.TurnMode {
-		case "auto_round_robin":
-			g.CurrentTurnBotID = nextAutoSpeaker(ms, g.CurrentTurnBotID, nowMs)
-			g.TurnQueue = []string{}
-			g.TurnStartedAt = nowMs
-		case "leader_round":
-			next, rest := popQueue(g.TurnQueue, ms)
-			if next != nil {
-				g.Status = "running"
-			} else {
-				g.Status = "waiting_for_leader"
-			}
-			g.CurrentTurnBotID = next
-			g.TurnQueue = rest
-			g.TurnStartedAt = nowMs
-		}
-		g.UpdatedAt = nowMs
+		advanceAfterSkip(g, ms, nowMs)
 		return saveGroup(ctx, conn, g)
 	})
 }
@@ -510,8 +565,9 @@ func (s *Store) SetTurnMode(ctx context.Context, groupID int64, mode string, now
 }
 
 func (s *Store) SetMaxTurns(ctx context.Context, groupID int64, maxTurns int64, nowMs int64) error {
-	if maxTurns < 1 {
-		return wrapErr(ErrValidation, "maxTurns must be at least 1")
+	maxTurns, err := validateMaxTurns(maxTurns)
+	if err != nil {
+		return err
 	}
 	return s.immediateTx(ctx, func(conn *sql.Conn) error {
 		g, err := loadGroup(ctx, conn, groupID)
@@ -686,65 +742,45 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 // Public room
 // ---------------------------------------------------------------------------
 
+// GetRoomState is a read-only poll in the common case. Presence writes are
+// coalesced and unknown tokens never touch the database writer.
 func (s *Store) GetRoomState(ctx context.Context, token string, nowMs int64) (*RoomState, error) {
-	var state *RoomState
-	err := s.immediateTx(ctx, func(conn *sql.Conn) error {
-		// Touch: refresh lastSeenAt (no-op for an unknown token).
-		_, _ = conn.ExecContext(ctx,
-			"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", nowMs, token)
-		var m Member
-		var isMock int
-		err := conn.QueryRowContext(ctx,
-			`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, last_seen_at
-			 FROM bot_members WHERE agent_token = ?`, token).
-			Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor, &isMock, &m.AgentToken, &m.LastSeenAt)
-		if err == sql.ErrNoRows {
-			return nil // unknown token -> nil state, like Motoko
-		}
-		if err != nil {
-			return err
-		}
-		m.IsMock = isMock != 0
-		if err := processDueMockTx(ctx, conn, m.GroupID, nowMs); err != nil {
-			return err
-		}
-		g, err := loadGroup(ctx, conn, m.GroupID)
-		if err != nil {
-			return err
-		}
-		ms, err := loadMembers(ctx, conn, m.GroupID)
-		if err != nil {
-			return err
-		}
-		var onlineNames []string
-		for _, x := range ms {
-			if isOnline(x, nowMs) {
-				onlineNames = append(onlineNames, x.Name)
-			}
-		}
-		if onlineNames == nil {
-			onlineNames = []string{}
-		}
-		msgs, err := loadMessages(ctx, conn, m.GroupID)
-		if err != nil {
-			return err
-		}
-		// Last 15, oldest first.
-		if len(msgs) > 15 {
-			msgs = msgs[len(msgs)-15:]
-		}
-		yourTurn := g.Status == "running" && g.CurrentTurnBotID != nil && *g.CurrentTurnBotID == m.BotID
-		state = &RoomState{
-			Status: g.Status, BotID: m.BotID, BotName: m.Name, RoleTitle: m.RoleTitle,
-			GroupName: g.Name, OnlineNames: onlineNames, TurnSeq: g.TurnSeq,
-			MaxTurns: g.MaxTurns, Topic: g.Topic, IsYourTurn: yourTurn, Messages: msgs,
-		}
-		return nil
-	})
+	m, err := loadMemberByToken(ctx, s.ro, token)
+	if err != nil || m == nil {
+		return nil, err // unknown token -> nil state, like Motoko
+	}
+	s.touchPresence(ctx, token, nowMs)
+	if err := s.applyDueMockIfNeeded(ctx, m.GroupID, nowMs); err != nil {
+		return nil, err
+	}
+	g, err := loadGroup(ctx, s.ro, m.GroupID)
 	if err != nil {
 		return nil, err
 	}
-	return state, nil
+	ms, err := loadMembers(ctx, s.ro, m.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	var onlineNames []string
+	for _, x := range ms {
+		if isOnline(x, nowMs) {
+			onlineNames = append(onlineNames, x.Name)
+		}
+	}
+	if onlineNames == nil {
+		onlineNames = []string{}
+	}
+	// Last 15, oldest first.
+	msgs, err := loadMessagesPage(ctx, s.ro, m.GroupID, 0, 0, 15)
+	if err != nil {
+		return nil, err
+	}
+	yourTurn := g.Status == "running" && g.CurrentTurnBotID != nil && *g.CurrentTurnBotID == m.BotID
+	return &RoomState{
+		Status: g.Status, BotID: m.BotID, BotName: m.Name, RoleTitle: m.RoleTitle,
+		GroupName: g.Name, OnlineNames: onlineNames, TurnSeq: g.TurnSeq,
+		MaxTurns: g.MaxTurns, Topic: g.Topic, IsYourTurn: yourTurn, Messages: msgs,
+	}, nil
 }
 
 // SubmitBotReply is the atomic turnSeq deduplication entry point: stale,
@@ -753,21 +789,12 @@ func (s *Store) GetRoomState(ctx context.Context, token string, nowMs int64) (*R
 func (s *Store) SubmitBotReply(ctx context.Context, token string, expectedTurnSeq int64, rawContent string, nowMs int64) (bool, error) {
 	accepted := false
 	err := s.immediateTx(ctx, func(conn *sql.Conn) error {
-		_, _ = conn.ExecContext(ctx,
-			"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", nowMs, token)
-		var m Member
-		var isMock int
-		err := conn.QueryRowContext(ctx,
-			`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, last_seen_at
-			 FROM bot_members WHERE agent_token = ?`, token).
-			Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor, &isMock, &m.AgentToken, &m.LastSeenAt)
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		if err != nil {
+		m, err := loadMemberByToken(ctx, conn, token)
+		if err != nil || m == nil {
 			return err
 		}
-		m.IsMock = isMock != 0
+		_, _ = conn.ExecContext(ctx,
+			"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", nowMs, token)
 		g, err := loadGroup(ctx, conn, m.GroupID)
 		if err != nil {
 			return err
@@ -797,6 +824,7 @@ func (s *Store) SubmitBotReply(ctx context.Context, token string, expectedTurnSe
 		if err != nil {
 			return err
 		}
+		g.SkipStreak = 0
 		advanceAfterReply(g, ms, nowMs)
 		if err := saveGroup(ctx, conn, g); err != nil {
 			return err

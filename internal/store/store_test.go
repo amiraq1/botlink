@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -353,3 +354,222 @@ func TestRotateToken(t *testing.T) {
 }
 
 func int64Ptr(v int64) *int64 { return &v }
+
+func TestSilentTurnTimeoutAndCircuitBreaker(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UnixMilli()
+	id := createTestGroup(t, st, now, "auto_round_robin", realMembers)
+	for i := 1; i <= len(realMembers); i++ {
+		if err := st.ProcessExpiredTurn(context.Background(), id, now+int64(i)*100_000, 90_000); err != nil {
+			t.Fatalf("ProcessExpiredTurn %d: %v", i, err)
+		}
+		d := detail(t, st, id, now)
+		if i < len(realMembers) {
+			if d.Group.TurnSeq != 1 || d.Group.Status != "running" {
+				t.Fatalf("after skip %d: seq=%d status=%s; want 1/running", i, d.Group.TurnSeq, d.Group.Status)
+			}
+		} else if d.Group.Status != "paused" {
+			t.Fatalf("after full silent cycle status = %s; want paused", d.Group.Status)
+		}
+	}
+	d := detail(t, st, id, now)
+	found := false
+	for _, m := range d.Messages {
+		if m.SenderBotID == "system" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("circuit breaker did not record a system event")
+	}
+}
+
+func TestLateReplyDoesNotDoubleAdvance(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UnixMilli()
+	id := createTestGroup(t, st, now, "auto_round_robin", realMembers)
+	d := detail(t, st, id, now)
+	token := tokenOf(d, "bot_1")
+
+	type result struct {
+		accepted bool
+		err      error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		ok, err := st.SubmitBotReply(context.Background(), token, 1, "late reply", now+100_000)
+		ch <- result{ok, err}
+	}()
+	if err := st.ProcessExpiredTurn(context.Background(), id, now+100_000, 90_000); err != nil {
+		t.Fatal(err)
+	}
+	r := <-ch
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	d = detail(t, st, id, now)
+	if r.accepted && d.Group.TurnSeq != 2 {
+		t.Fatalf("reply accepted but turnSeq = %d; want 2", d.Group.TurnSeq)
+	}
+	if !r.accepted && d.Group.TurnSeq != 1 {
+		t.Fatalf("reply rejected by skip but turnSeq = %d; want 1", d.Group.TurnSeq)
+	}
+	if r.accepted && d.Group.SkipStreak != 0 {
+		t.Fatalf("accepted reply left skipStreak = %d", d.Group.SkipStreak)
+	}
+}
+
+func TestPresenceWritesAreCoalesced(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UnixMilli()
+	id := createTestGroup(t, st, now, "auto_round_robin", realMembers)
+	d := detail(t, st, id, now)
+	token := tokenOf(d, "bot_1")
+
+	for i := 1; i <= 5; i++ {
+		if _, err := st.GetRoomState(context.Background(), token, now+int64(i)*1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var seen int64
+	if err := st.ro.QueryRowContext(context.Background(),
+		"SELECT last_seen_at FROM bot_members WHERE agent_token = ?", token).Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	if seen != now+1000 {
+		t.Fatalf("last_seen_at = %d after 5 polls; want first touch %d", seen, now+1000)
+	}
+	if _, err := st.GetRoomState(context.Background(), token, now+31_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ro.QueryRowContext(context.Background(),
+		"SELECT last_seen_at FROM bot_members WHERE agent_token = ?", token).Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	if seen != now+31_000 {
+		t.Fatalf("last_seen_at = %d after interval; want %d", seen, now+31_000)
+	}
+}
+
+func TestMentionBoundary(t *testing.T) {
+	cases := []struct {
+		text, name string
+		want       bool
+	}{
+		{"hello @Ali2", "Ali", false},
+		{"hello @Ali-2", "Ali", false},
+		{"hello @Ali_X", "Ali", false},
+		{"hello @Ali, your turn", "Ali", true},
+		{"@Ali", "Ali", true},
+		{"foo@Ali bar", "Ali", false},
+		{"@ali!", "Ali", true},
+	}
+	for _, c := range cases {
+		if got := mentionsMember(c.text, c.name); got != c.want {
+			t.Errorf("mentionsMember(%q, %q) = %v; want %v", c.text, c.name, got, c.want)
+		}
+	}
+}
+
+func TestMaxTurnsBoundsAndPagination(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UnixMilli()
+	bad := createTestGroupInput()
+	bad.MaxTurns = -1
+	if _, err := st.CreateGroup(context.Background(), bad, now); err == nil {
+		t.Fatal("negative maxTurns was accepted")
+	}
+	bad.MaxTurns = 501
+	if _, err := st.CreateGroup(context.Background(), bad, now); err == nil {
+		t.Fatal("maxTurns above limit was accepted")
+	}
+	if err := st.SetMaxTurns(context.Background(), 1, 0, now); err == nil {
+		t.Fatal("SetMaxTurns(0) was accepted")
+	}
+
+	id := createTestGroup(t, st, now, "auto_round_robin", realMembers)
+	for i := 0; i < 3; i++ {
+		if err := st.SendLeaderMessage(context.Background(), id, "message "+strconv.Itoa(i), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all := detail(t, st, id, now)
+	if len(all.Messages) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(all.Messages))
+	}
+	delta, err := st.GetGroupDetailPaged(context.Background(), id, now, 0, all.Messages[0].ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range delta.Messages {
+		if m.ID <= all.Messages[0].ID {
+			t.Fatalf("delta returned old message id %d", m.ID)
+		}
+	}
+	if len(delta.Messages) != len(all.Messages)-1 {
+		t.Fatalf("delta returned %d messages; want %d", len(delta.Messages), len(all.Messages)-1)
+	}
+}
+
+func TestMemberNamesAndRolesSanitized(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now().UnixMilli()
+	id, err := st.CreateGroup(context.Background(), CreateGroupInput{
+		Name: "G", TurnMode: "auto_round_robin", MaxTurns: 20,
+		Members: []MemberInput{
+			{Name: "A\u202e\u200bli", RoleTitle: "de\u202e\u200bv"},
+			{Name: "Beta", RoleTitle: "qa"},
+		},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := detail(t, st, id, now)
+	if d.Members[0].Name != "Ali" || d.Members[0].RoleTitle != "dev" {
+		t.Fatalf("created member = %q / %q; want Ali/dev", d.Members[0].Name, d.Members[0].RoleTitle)
+	}
+
+	if err := st.AddMember(context.Background(), id,
+		MemberInput{Name: "C\u200b", RoleTitle: "s\ufe0fre"}, now); err != nil {
+		t.Fatal(err)
+	}
+	d = detail(t, st, id, now)
+	var added *Member
+	for i := range d.Members {
+		if d.Members[i].BotID == "bot_3" {
+			added = &d.Members[i]
+		}
+	}
+	if added == nil || added.Name != "C" || added.RoleTitle != "sre" {
+		t.Fatalf("added member = %+v; want C/sre", added)
+	}
+}
+
+func TestMessageRetention(t *testing.T) {
+	previous := messageRetention
+	SetMessageRetention(2)
+	t.Cleanup(func() { messageRetention = previous })
+
+	st := openTestStore(t)
+	now := time.Now().UnixMilli()
+	id := createTestGroup(t, st, now, "auto_round_robin", realMembers)
+	for i := 0; i < 4; i++ {
+		if err := st.SendLeaderMessage(context.Background(), id, "m"+strconv.Itoa(i), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.PruneOldMessages(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	d := detail(t, st, id, now)
+	if len(d.Messages) != 2 {
+		t.Fatalf("retained %d messages; want 2", len(d.Messages))
+	}
+}
+
+func createTestGroupInput() CreateGroupInput {
+	return CreateGroupInput{
+		Name: "G", TurnMode: "auto_round_robin", MaxTurns: 20,
+		Members: []MemberInput{{Name: "A"}, {Name: "B"}},
+	}
+}

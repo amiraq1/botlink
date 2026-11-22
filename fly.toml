@@ -4,6 +4,11 @@ primary_region = "fra"
 [build]
   dockerfile = "Dockerfile"
 
+# SQLite lives on a machine-local volume: never run more than one machine
+# until storage is migrated to a shared database.
+[deploy]
+  strategy = "immediate"
+
 [env]
   PORT = "8080"
 

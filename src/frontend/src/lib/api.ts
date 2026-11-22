@@ -50,6 +50,7 @@ export interface GroupDetail {
   members: Array<MemberView>;
   messages: Array<Message>;
   group: Group;
+  hasMore: boolean;
 }
 
 export interface GroupSummary {
@@ -191,6 +192,11 @@ export async function checkAuth(): Promise<boolean> {
   }
 }
 
+/** Invalidate every signed-in admin session on the server. */
+export async function revokeAllSessions(): Promise<void> {
+  await post("/api/admin/sessions/revoke-all");
+}
+
 // ---------------------------------------------------------------------------
 // Admin groups
 // ---------------------------------------------------------------------------
@@ -199,9 +205,27 @@ export async function listGroups(): Promise<GroupSummary[]> {
   return request<GroupSummary[]>("/api/admin/groups");
 }
 
-export async function getGroupDetail(id: GroupId): Promise<GroupDetail | null> {
+export interface GroupDetailParams {
+  /** Return only messages with id greater than this cursor (delta polling). */
+  afterId?: number;
+  /** Return at most this many older messages before the cursor. */
+  beforeId?: number;
+  limit?: number;
+}
+
+export async function getGroupDetail(
+  id: GroupId,
+  params: GroupDetailParams = {},
+): Promise<GroupDetail | null> {
+  const query = new URLSearchParams();
+  if (params.afterId) query.set("after_id", String(params.afterId));
+  if (params.beforeId) query.set("before_id", String(params.beforeId));
+  if (params.limit) query.set("limit", String(params.limit));
+  const suffix = query.toString();
   try {
-    return await request<GroupDetail>(`/api/admin/groups/${id}`);
+    return await request<GroupDetail>(
+      `/api/admin/groups/${id}${suffix ? `?${suffix}` : ""}`,
+    );
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;

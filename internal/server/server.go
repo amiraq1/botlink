@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -30,6 +32,14 @@ type Config struct {
 	// SessionSecretEphemeral is true when the secret was generated at
 	// startup because SESSION_SECRET was unset (dev only).
 	SessionSecretEphemeral bool
+	// TrustedProxyHeader names a header set by the edge (e.g. Fly-Client-IP).
+	TrustedProxyHeader string
+	// TrustedProxies are CIDRs allowed to forward X-Forwarded-For.
+	TrustedProxies []*net.IPNet
+	// TrustHeaderAlways skips the peer check; only enable when every
+	// request is guaranteed to pass through the trusted edge.
+	TrustHeaderAlways bool
+	TurnTimeoutSec    int64
 }
 
 type Server struct {
@@ -40,19 +50,36 @@ type Server struct {
 	adminPassword string
 	sessionSecret []byte
 
+	trustedProxyHeader string
+	trustedProxies     []*net.IPNet
+	trustHeaderAlways  bool
+
 	loginMu      sync.Mutex
 	loginAttempt map[string][]time.Time
+
+	roomGETLimiter  *windowLimiter
+	roomPOSTLimiter *windowLimiter
+	roomIPLimiter   *windowLimiter
 }
 
 func New(cfg Config, st *store.Store) *Server {
 	s := &Server{
-		cfg:           cfg,
-		store:         st,
-		mux:           http.NewServeMux(),
-		log:           log.New(os.Stdout, "botlink: ", log.LstdFlags),
-		adminPassword: cfg.AdminPassword,
-		sessionSecret: cfg.SessionSecret,
-		loginAttempt:  map[string][]time.Time{},
+		cfg:                cfg,
+		store:              st,
+		mux:                http.NewServeMux(),
+		log:                log.New(os.Stdout, "botlink: ", log.LstdFlags),
+		adminPassword:      cfg.AdminPassword,
+		sessionSecret:      cfg.SessionSecret,
+		trustedProxyHeader: cfg.TrustedProxyHeader,
+		trustedProxies:     cfg.TrustedProxies,
+		trustHeaderAlways:  cfg.TrustHeaderAlways,
+		loginAttempt:       map[string][]time.Time{},
+		roomGETLimiter:     newWindowLimiter(60, time.Minute, 8192),
+		roomPOSTLimiter:    newWindowLimiter(10, time.Minute, 8192),
+		roomIPLimiter:      newWindowLimiter(180, time.Minute, 8192),
+	}
+	if len(s.trustedProxies) == 0 {
+		s.trustedProxies = parseCIDRs(DefaultTrustedProxies)
 	}
 	s.routes()
 	return s
@@ -88,6 +115,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/admin/groups/{id}/members", s.requireAdmin(s.handleAddMember))
 	s.mux.HandleFunc("DELETE /api/admin/groups/{id}/members/{botId}", s.requireAdmin(s.handleRemoveMember))
 	s.mux.HandleFunc("POST /api/admin/groups/{id}/members/{botId}/rotate-token", s.requireAdmin(s.handleRotateToken))
+	s.mux.HandleFunc("POST /api/admin/sessions/revoke-all", s.requireAdmin(s.handleRevokeAllSessions))
 
 	// Static frontend + SPA fallback (everything else).
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -175,17 +203,36 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if ip := strings.TrimSpace(strings.Split(xff, ",")[0]); ip != "" {
-			return ip
+// tokenBucketKey never stores the raw agent token in the limiter map.
+func tokenBucketKey(ip, token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return ip + "|" + hex.EncodeToString(sum[:8])
+}
+
+// roomRateOK applies the per-(IP, token) limits and a global per-IP cap, and
+// writes a 429 with Retry-After when any of them is exhausted.
+func (s *Server) roomRateOK(w http.ResponseWriter, r *http.Request, token string, post bool) bool {
+	ip := s.clientIP(r)
+	now := time.Now()
+	key := tokenBucketKey(ip, token)
+	checks := []*windowLimiter{s.roomIPLimiter}
+	if post {
+		checks = append(checks, s.roomPOSTLimiter)
+	} else {
+		checks = append(checks, s.roomGETLimiter)
+	}
+	for _, limiter := range checks {
+		limitKey := key
+		if limiter == s.roomIPLimiter {
+			limitKey = ip
+		}
+		if ok, retry := limiter.allow(limitKey, now); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeError(w, http.StatusTooManyRequests, "too many requests, try again later")
+			return false
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return true
 }
 
 // loginAllowed is a basic per-IP rate limit: 10 attempts per minute.
@@ -213,7 +260,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "admin login is not configured: set ADMIN_PASSWORD")
 		return
 	}
-	if !s.loginAllowed(clientIP(r), time.Now()) {
+	if !s.loginAllowed(s.clientIP(r), time.Now()) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -227,12 +274,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid password")
 		return
 	}
-	setSessionCookie(w, r, s.sessionSecret, time.Now())
+	sessionID, err := store.NewSessionID()
+	if err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	now := time.Now()
+	if err := s.store.CreateAdminSession(r.Context(), sessionID,
+		now.UnixMilli(), now.Add(sessionTTL).UnixMilli()); err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	setSessionCookie(w, r, newSessionToken(s.sessionSecret, sessionID, now))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	clearSessionCookie(w)
+	if c, err := r.Cookie(sessionCookieName); err == nil {
+		if id, ok := verifySessionToken(s.sessionSecret, c.Value, time.Now()); ok {
+			_ = s.store.RevokeAdminSession(r.Context(), id, nowMs())
+		}
+	}
+	clearSessionCookie(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -245,6 +308,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
+	if !s.roomRateOK(w, r, r.PathValue("token"), false) {
+		return
+	}
 	state, err := s.store.GetRoomState(r.Context(), r.PathValue("token"), nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
@@ -261,6 +327,9 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
+	if !s.roomRateOK(w, r, r.PathValue("token"), true) {
+		return
+	}
 	var body struct {
 		ExpectedTurnSeq int64  `json:"expectedTurnSeq"`
 		Content         string `json:"content"`
@@ -309,7 +378,19 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid group id")
 		return
 	}
-	detail, err := s.store.GetGroupDetail(r.Context(), id, nowMs())
+	beforeID, afterID, limit := int64(0), int64(0), int64(100)
+	if raw := r.URL.Query().Get("before_id"); raw != "" {
+		beforeID, _ = strconv.ParseInt(raw, 10, 64)
+	}
+	if raw := r.URL.Query().Get("after_id"); raw != "" {
+		afterID, _ = strconv.ParseInt(raw, 10, 64)
+	}
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	detail, err := s.store.GetGroupDetailPaged(r.Context(), id, nowMs(), beforeID, afterID, limit)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -472,8 +553,17 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, index)
 }
 
-// StartMockSweeper runs the 15-second mock-reply safety net until ctx ends.
-func (s *Server) StartMockSweeper(ctx context.Context) {
+func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.RevokeAllAdminSessions(r.Context(), nowMs()); err != nil {
+		s.handleStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// StartTurnSweeper runs the 15-second safety net for mock replies, silent
+// real bots and expired admin sessions until ctx ends.
+func (s *Server) StartTurnSweeper(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -481,9 +571,11 @@ func (s *Server) StartMockSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.store.SweepDueMocks(ctx, nowMs()); err != nil {
-				s.log.Printf("mock sweep error: %v", err)
+			if err := s.store.SweepTurns(ctx, nowMs(), s.turnTimeoutMs()); err != nil {
+				s.log.Printf("turn sweep error: %v", err)
 			}
 		}
 	}
 }
+
+func (s *Server) turnTimeoutMs() int64 { return s.cfg.TurnTimeoutSec * 1000 }

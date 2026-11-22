@@ -2,10 +2,10 @@ import type { GroupDetail, Message } from "@/lib/api";
 import GroupIntroCard from "@/components/chat/GroupIntroCard";
 import MessageBubble from "@/components/chat/MessageBubble";
 import { dayKey, formatDayDividerAr } from "@/lib/convert";
+import { isLongGap } from "@/lib/messageGap";
 import { ArrowDown, MessageCircle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const GAP_NS = 2n * 3_600n * 1_000_000_000n;
 const PIN_THRESHOLD_PX = 80;
 
 interface StreamItem {
@@ -22,8 +22,7 @@ function buildItems(messages: Message[]): StreamItem[] {
   messages.forEach((message, i) => {
     const newDay =
       !previous || dayKey(previous.createdAt) !== dayKey(message.createdAt);
-    const longGap =
-      !!previous && message.createdAt - previous.createdAt > GAP_NS;
+    const longGap = isLongGap(previous?.createdAt, message.createdAt);
     if (newDay || longGap) {
       items.push({
         key: `divider-${message.id}`,

@@ -11,6 +11,7 @@ import {
   getGroupDetail as apiGetGroupDetail,
   listGroups as apiListGroups,
   pauseGroup as apiPauseGroup,
+  revokeAllSessions as apiRevokeAllSessions,
   removeMember as apiRemoveMember,
   resumeGroup as apiResumeGroup,
   rotateMemberToken,
@@ -38,7 +39,7 @@ export function useIsAdmin() {
   });
 }
 
-/** All groups, most recently updated first, refreshed about every 5 seconds. */
+/** All groups, most recently updated first; backs off when nothing changes. */
 export function useGroups() {
   return useQuery<GroupSummary[]>({
     queryKey: groupsKey,
@@ -46,20 +47,52 @@ export function useGroups() {
       const groups = await apiListGroups();
       return [...groups].sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
-    refetchInterval: 5000,
+    refetchInterval: (query) => {
+      const newest = query.state.data?.[0]?.updatedAt ?? 0;
+      return Date.now() - newest > 60_000 ? 10_000 : 5000;
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 }
 
-/** Group detail, polled every 2.5s. Null means unknown id. */
+/**
+ * Group detail with delta polling: only newer messages are fetched, then
+ * merged into the cached list (capped at 500) instead of resending the full
+ * history every 2.5s. Hidden tabs stop polling via refetchIntervalInBackground.
+ */
 export function useGroupDetail(id: GroupId | null) {
+  const queryClient = useQueryClient();
   return useQuery<GroupDetail | null>({
     queryKey: id === null ? ["group", "none"] : groupKey(id),
     queryFn: async () => {
       if (id === null) return null;
-      return apiGetGroupDetail(id);
+      const cached = queryClient.getQueryData<GroupDetail | null>(groupKey(id));
+      const afterId = cached?.messages?.at(-1)?.id ?? 0;
+      const fresh = await apiGetGroupDetail(
+        id,
+        afterId ? { afterId, limit: 200 } : { limit: 100 },
+      );
+      if (!fresh || !afterId || !cached) return fresh;
+      const merged = [...cached.messages];
+      const known = new Set(merged.map((m) => m.id));
+      for (const message of fresh.messages) {
+        if (!known.has(message.id)) merged.push(message);
+      }
+      return {
+        ...fresh,
+        messages: merged.length > 500 ? merged.slice(-500) : merged,
+      };
     },
     enabled: id !== null,
-    refetchInterval: 2500,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) return 2500;
+      const last = data.messages.at(-1)?.createdAt ?? data.group.updatedAt;
+      return Date.now() - last > 60_000 ? 10_000 : 2500;
+    },
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
   });
 }
 
@@ -177,5 +210,11 @@ export function useRotateMemberToken() {
     onSuccess: (_data, { groupId }) => {
       refresh(groupId);
     },
+  });
+}
+
+export function useRevokeAllSessions() {
+  return useMutation<void, Error, void>({
+    mutationFn: () => apiRevokeAllSessions(),
   });
 }

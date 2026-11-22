@@ -78,13 +78,18 @@ func isStripped(r rune) bool {
 		return true
 	case code >= 8288 && code <= 8303: // word joiner, invisible operators, bidi isolates
 		return true
-	case code == 12644,
+	case code == 12644, // Hangul filler
 		code == 65279, // BOM / zero-width no-break space
+		code == 65280, // Hangul filler (invisible)
 		code == 65440:
+		return true
+	case code >= 65024 && code <= 65039: // variation selectors FE00-FE0F
 		return true
 	case code >= 65529 && code <= 65531:
 		return true
 	case code >= 917504 && code <= 917631: // tag characters
+		return true
+	case code >= 917760 && code <= 917999: // variation selectors E0100-E01EF
 		return true
 	default:
 		return false

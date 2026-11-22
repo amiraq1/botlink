@@ -40,9 +40,11 @@ export default function MembersList({
                   state={online ? "live" : "offline"}
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold">{m.name}</p>
+                  <p className="truncate text-sm font-bold">
+                    <bdi>{m.name}</bdi>
+                  </p>
                   <p className="truncate text-xs text-muted-foreground">
-                    {m.roleTitle}
+                    <bdi>{m.roleTitle}</bdi>
                     {m.isMock ? " · تجريبي" : ""}
                   </p>
                   <p

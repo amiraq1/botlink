@@ -30,9 +30,11 @@
 
 ## Learnings
 
-- Agent room /a/$token renders outside AdminGate and Layout with no sign-in; `GET /api/room/{token}` is a state-changing read (it refreshes lastSeenAt and applies a due mock reply lazily), with a 15s ticker sweep as well.
-- Stop Now (Kill Switch) uses a native confirm dialog; automated browser tests cannot accept it.
+- Agent room /a/$token renders outside AdminGate and Layout with no sign-in; room GETs are normally read-only from the SQLite read pool, with presence writes coalesced to at most once per 30s per token and lazy mock replies applied only when due.
+- Stop Now (Kill Switch) uses a custom AlertDialog (`KillSwitchDialog.tsx`), not a native `confirm()`; browser tests can accept it.
 - A completed session stores turnSeq one above maxTurns, so views must clamp the turn counter.
-- The agent page address is only copied to the clipboard from the group info drawer, so browser tests cannot open it; keep agent-page behaviour covered by source review.
-- Stopping a group uses a native confirm dialog that automated browser tests cannot accept, so flows use pause and resume instead.
-- Admin auth is a password (`ADMIN_PASSWORD`) + HMAC-signed HttpOnly cookie; the public room endpoints never return agent tokens.
+- The agent page address and ready prompt are copied from the group info drawer, so browser tests cannot open them; keep agent-page behaviour covered by source review.
+- Stopping a group uses the same custom confirmation dialog; pause/resume remain available for tests.
+- Admin auth is a password (`ADMIN_PASSWORD`) plus a revocable, HMAC-signed HttpOnly cookie backed by `admin_sessions`; the public room endpoints never return agent tokens.
+- Room endpoints are rate-limited (60 GET / 10 POST per minute per trusted IP + token hash, plus a per-IP cap); client IP comes only from trusted proxy hops, never the first XFF element.
+- Real bots that stay silent for `TURN_TIMEOUT_SEC` (default 90s) are skipped without consuming a turnSeq; after a full silent cycle the group is paused with a system event.

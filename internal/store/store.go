@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,15 +31,64 @@ const (
 	DefaultGroupDescription = "مجموعة خاصة لتنسيق المهام وتطوير المشاريع"
 	DefaultMaxTurns         = int64(20)
 	DefaultMockDelaySec     = int64(12)
+	DefaultTurnTimeoutSec   = int64(90)
 )
 
 var (
 	ErrNotFound   = errors.New("not found")
 	ErrValidation = errors.New("validation error")
+
+	// maxTurnsLimit caps conversation length; configurable at startup.
+	maxTurnsLimit = int64(500)
+	// messageRetention is the maximum number of messages kept per group.
+	messageRetention = int64(2000)
 )
 
 func wrapErr(kind error, msg string) error {
 	return fmt.Errorf("%w: %s", kind, msg)
+}
+
+// SetMaxTurnsLimit overrides the upper bound used by validateMaxTurns.
+func SetMaxTurnsLimit(n int64) {
+	if n >= 1 {
+		maxTurnsLimit = n
+	}
+}
+
+// SetMessageRetention overrides the per-group message cap.
+func SetMessageRetention(n int64) {
+	if n >= 1 {
+		messageRetention = n
+	}
+}
+
+// PruneOldMessages keeps storage bounded by dropping messages beyond the
+// retention window (oldest first) from every group.
+func (s *Store) PruneOldMessages(ctx context.Context) error {
+	if messageRetention <= 0 {
+		return nil
+	}
+	ids, err := s.groupIDs(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, err := s.db.ExecContext(ctx,
+			`DELETE FROM messages WHERE group_id = ? AND id NOT IN
+			 (SELECT id FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT ?)`,
+			id, id, messageRetention); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMaxTurns(n int64) (int64, error) {
+	if n < 1 || n > maxTurnsLimit {
+		return 0, wrapErr(ErrValidation,
+			fmt.Sprintf("maxTurns must be between 1 and %d", maxTurnsLimit))
+	}
+	return n, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +108,7 @@ type Group struct {
 	TurnQueue        []string `json:"turnQueue"`
 	MockDelaySec     int64    `json:"mockDelaySec"`
 	TurnStartedAt    int64    `json:"turnStartedAt"`
+	SkipStreak       int64    `json:"skipStreak"`
 	CreatedAt        int64    `json:"createdAt"`
 	UpdatedAt        int64    `json:"updatedAt"`
 }
@@ -104,6 +156,7 @@ type GroupDetail struct {
 	Group    Group     `json:"group"`
 	Members  []Member  `json:"members"`
 	Messages []Message `json:"messages"`
+	HasMore  bool      `json:"hasMore"`
 }
 
 // RoomState is the public agent-room view. It NEVER contains agent tokens.
@@ -143,8 +196,29 @@ type CreateGroupInput struct {
 // ---------------------------------------------------------------------------
 
 type Store struct {
+	// db is the single writer connection. All mutations run through
+	// immediateTx on this pool (MaxOpenConns=1), so BEGIN IMMEDIATE never
+	// contends with another writer inside the process.
 	db *sql.DB
+	// ro is a separate read-only pool. WAL lets these readers run while a
+	// writer is active, so polling never queues behind a write transaction.
+	ro *sql.DB
+
+	presenceMu  sync.Mutex
+	presence    map[string]int64
+	lastPruneMs int64
+
+	turnTimeoutMs int64
 }
+
+const (
+	// PresenceWriteInterval is the minimum gap between two database writes
+	// of the same member's last_seen_at. 30s stays inside the 45s online
+	// window while turning most room GETs into pure reads.
+	PresenceWriteInterval = int64(30_000)
+	presencePruneInterval = int64(5 * 60_000)
+	DefaultReadPoolSize   = 4
+)
 
 // Open creates parent directories, opens (or creates) the SQLite database
 // and applies the schema with WAL mode, foreign keys and a busy timeout.
@@ -158,10 +232,16 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Serialize access: one connection is enough for this workload and
+	// Serialize writes: one connection is enough for this workload and
 	// keeps BEGIN IMMEDIATE transactions free of busy errors.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	db.SetMaxIdleConns(1)
+	s := &Store{
+		db:            db,
+		presence:      map[string]int64{},
+		lastPruneMs:   time.Now().UnixMilli(),
+		turnTimeoutMs: DefaultTurnTimeoutSec * 1000,
+	}
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
@@ -178,10 +258,78 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+
+	// Read-only pool. modernc.org/sqlite accepts file:<path>?mode=ro.
+	ro, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open read pool: %w", err)
+	}
+	ro.SetMaxOpenConns(DefaultReadPoolSize)
+	ro.SetMaxIdleConns(DefaultReadPoolSize)
+	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA query_only=ON"} {
+		if _, err := ro.Exec(p); err != nil {
+			ro.Close()
+			db.Close()
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+	}
+	s.ro = ro
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.ro != nil {
+		_ = s.ro.Close()
+	}
+	return s.db.Close()
+}
+
+// touchPresence records a room touch, writing to the database at most once
+// per PresenceWriteInterval per token. Entries are pruned by TTL so a flood
+// of random tokens cannot grow the map without bound.
+func (s *Store) touchPresence(ctx context.Context, token string, nowMs int64) {
+	s.presenceMu.Lock()
+	last := s.presence[token]
+	if nowMs-last < PresenceWriteInterval {
+		s.presenceMu.Unlock()
+		return
+	}
+	s.presence[token] = nowMs
+	if nowMs-s.lastPruneMs > presencePruneInterval {
+		for k, t := range s.presence {
+			if nowMs-t > presencePruneInterval {
+				delete(s.presence, k)
+			}
+		}
+		s.lastPruneMs = nowMs
+	}
+	// Only 1..~4 entries can be pruned per call at steady state; cap the
+	// map explicitly so an attacker with random tokens cannot exhaust RAM.
+	if len(s.presence) > 8192 {
+		for k, t := range s.presence {
+			if nowMs-t > PresenceWriteInterval {
+				delete(s.presence, k)
+			}
+			if len(s.presence) <= 4096 {
+				break
+			}
+		}
+	}
+	s.presenceMu.Unlock()
+
+	// Errors are deliberately ignored, as in the previous inline UPDATE:
+	// presence is best-effort and must never fail a room read.
+	_, _ = s.db.ExecContext(ctx,
+		"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", nowMs, token)
+}
+
+// SetTurnTimeout configures the sweep timeout for silent real bots.
+func (s *Store) SetTurnTimeout(seconds int64) {
+	if seconds > 0 {
+		s.turnTimeoutMs = seconds * 1000
+	}
+}
 
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
@@ -198,6 +346,7 @@ CREATE TABLE IF NOT EXISTS groups (
   turn_queue TEXT NOT NULL DEFAULT '[]',
   mock_delay_sec INTEGER NOT NULL DEFAULT 12,
   turn_started_at INTEGER NOT NULL DEFAULT 0,
+  skip_streak INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL DEFAULT 0
 );
@@ -223,10 +372,55 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
 CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, id);
 CREATE INDEX IF NOT EXISTS idx_members_group ON bot_members(group_id, bot_id);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	// Existing databases created before the silent-turn circuit breaker need
+	// the new column; ALTER is idempotent via a pragma check.
+	rows, err := ctxQuery(ctx, s.db, "PRAGMA table_info(groups)")
+	if err != nil {
+		return err
+	}
+	hasSkipStreak := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "skip_streak" {
+			hasSkipStreak = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !hasSkipStreak {
+		if _, err := s.db.ExecContext(ctx,
+			"ALTER TABLE groups ADD COLUMN skip_streak INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ctxQuery is a tiny helper so migrate can use QueryContext uniformly.
+func ctxQuery(ctx context.Context, db *sql.DB, query string) (*sql.Rows, error) {
+	return db.QueryContext(ctx, query)
 }
 
 // immediateTx runs fn inside a SQLite BEGIN IMMEDIATE transaction on a
@@ -312,7 +506,9 @@ func sortMembers(ms []Member) {
 }
 
 func buildMember(groupID int64, num int, in MemberInput, token string) Member {
-	rawName := capText(trimText(in.Name), 40)
+	// buildMember is used by both CreateGroup and AddMember, so sanitizing
+	// here covers every path that persists a member name or role title.
+	rawName := capText(trimText(Sanitize(in.Name)), 40)
 	name := rawName
 	if name == "" {
 		name = "Bot " + strconv.Itoa(num)
@@ -325,7 +521,7 @@ func buildMember(groupID int64, num int, in MemberInput, token string) Member {
 		GroupID:     groupID,
 		BotID:       "bot_" + strconv.Itoa(num),
 		Name:        name,
-		RoleTitle:   capText(trimText(in.RoleTitle), 60),
+		RoleTitle:   capText(trimText(Sanitize(in.RoleTitle)), 60),
 		AccentColor: color,
 		IsMock:      in.IsMock,
 		AgentToken:  token,
@@ -353,7 +549,7 @@ func scanGroup(row *sql.Row) (*Group, error) {
 	var queue string
 	err := row.Scan(&g.ID, &g.Name, &g.Description, &g.Topic, &g.Status, &g.TurnMode,
 		&g.MaxTurns, &g.TurnSeq, &current, &queue, &g.MockDelaySec,
-		&g.TurnStartedAt, &g.CreatedAt, &g.UpdatedAt)
+		&g.TurnStartedAt, &g.SkipStreak, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +567,7 @@ func scanGroup(row *sql.Row) (*Group, error) {
 }
 
 const groupCols = `id, name, description, topic, status, turn_mode, max_turns, turn_seq,
-	current_turn_bot_id, turn_queue, mock_delay_sec, turn_started_at, created_at, updated_at`
+	current_turn_bot_id, turn_queue, mock_delay_sec, turn_started_at, skip_streak, created_at, updated_at`
 
 func loadGroup(ctx context.Context, q querier, id int64) (*Group, error) {
 	g, err := scanGroup(q.QueryRowContext(ctx,
@@ -411,6 +607,25 @@ func loadMembers(ctx context.Context, q querier, groupID int64) ([]Member, error
 	return ms, nil
 }
 
+// loadMemberByToken returns nil (not an error) for an unknown token.
+func loadMemberByToken(ctx context.Context, q querier, token string) (*Member, error) {
+	var m Member
+	var isMock int
+	err := q.QueryRowContext(ctx,
+		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, last_seen_at
+		 FROM bot_members WHERE agent_token = ?`, token).
+		Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
+			&isMock, &m.AgentToken, &m.LastSeenAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	m.IsMock = isMock != 0
+	return &m, nil
+}
+
 func loadMessages(ctx context.Context, q querier, groupID int64) ([]Message, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT id, group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at
@@ -422,6 +637,51 @@ func loadMessages(ctx context.Context, q querier, groupID int64) ([]Message, err
 	msgs, err := scanMessages(rows)
 	if err != nil {
 		return nil, err
+	}
+	return msgs, nil
+}
+
+// loadMessagesPage loads at most limit messages. beforeID/afterID are
+// cursor-style bounds: beforeID returns older messages (newest of that
+// batch first, then reversed), afterID returns newer messages in order.
+// A zero value means "no bound".
+func loadMessagesPage(ctx context.Context, q querier, groupID, beforeID, afterID, limit int64) ([]Message, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	var query string
+	var args []any
+	switch {
+	case beforeID > 0:
+		query = `SELECT id, group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at
+			 FROM messages WHERE group_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
+		args = []any{groupID, beforeID, limit}
+	case afterID > 0:
+		query = `SELECT id, group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at
+			 FROM messages WHERE group_id = ? AND id > ? ORDER BY id ASC LIMIT ?`
+		args = []any{groupID, afterID, limit}
+	default:
+		query = `SELECT id, group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at
+			 FROM (SELECT * FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT ?)
+			 ORDER BY id ASC`
+		args = []any{groupID, limit}
+	}
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	msgs, err := scanMessages(rows)
+	if err != nil {
+		return nil, err
+	}
+	if beforeID > 0 {
+		for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+			msgs[i], msgs[j] = msgs[j], msgs[i]
+		}
 	}
 	return msgs, nil
 }
@@ -469,10 +729,10 @@ func saveGroup(ctx context.Context, q querier, g *Group) error {
 	}
 	_, err := ex.ExecContext(ctx,
 		`UPDATE groups SET name=?, description=?, topic=?, status=?, turn_mode=?, max_turns=?,
-		 turn_seq=?, current_turn_bot_id=?, turn_queue=?, mock_delay_sec=?, turn_started_at=?, updated_at=?
-		 WHERE id=?`,
+		 turn_seq=?, current_turn_bot_id=?, turn_queue=?, mock_delay_sec=?, turn_started_at=?,
+		 skip_streak=?, updated_at=? WHERE id=?`,
 		g.Name, g.Description, g.Topic, g.Status, g.TurnMode, g.MaxTurns, g.TurnSeq,
-		current, string(queue), g.MockDelaySec, g.TurnStartedAt, g.UpdatedAt, g.ID)
+		current, string(queue), g.MockDelaySec, g.TurnStartedAt, g.SkipStreak, g.UpdatedAt, g.ID)
 	return err
 }
 

@@ -31,7 +31,10 @@ export default function MessageBubble({
               className="bubble-leader min-w-0 px-4 py-2.5 text-[15px] leading-relaxed"
               style={{ borderStartEndRadius: 6 }}
             >
-              <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+              <p
+                dir="auto"
+                className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+              >
                 {message.content}
               </p>
             </div>
@@ -58,7 +61,7 @@ export default function MessageBubble({
       />
       <div className="flex min-w-0 max-w-[85%] flex-col gap-1 md:max-w-[65%]">
         <span className="px-1 text-xs font-bold text-bot">
-          {message.senderName}
+          <bdi>{message.senderName}</bdi>
         </span>
         <div className="flex items-end gap-2">
           <div className="bubble-bot bubble-tail min-w-0 px-4 py-2.5 text-[15px] leading-relaxed">

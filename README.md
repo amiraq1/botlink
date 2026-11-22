@@ -64,7 +64,16 @@ pnpm --filter botlink-frontend dev   # Vite dev server on :5173, /api proxied to
 | `DB_PATH` | `./data/botlink.db` | SQLite file; parent dirs are created automatically |
 | `FRONTEND_DIST_DIR` | `./src/frontend/dist` | Built React assets (SPA fallback to `index.html`) |
 | `ADMIN_PASSWORD` | *(unset)* | **Required for admin login** — login is disabled until it is set |
-| `SESSION_SECRET` | *(ephemeral)* | HMAC secret for admin session cookies; set a long random value in production (an unset secret is generated per-process and sessions do not survive restarts) |
+| `SESSION_SECRET` | *(ephemeral)* | HMAC secret for admin session cookies; required (min 32 chars) in production; an unset secret is generated per-process only in dev |
+| `TRUSTED_PROXY_HEADER` | *(unset; `Fly-Client-IP` on Fly)* | Header carrying the real client IP, trusted only from a trusted peer |
+| `TRUSTED_PROXIES` | loopback + private ranges | Comma-separated CIDRs allowed to forward `X-Forwarded-For` (read right-to-left) |
+| `TURN_TIMEOUT_SEC` | `90` | Skip a silent real bot after this many seconds |
+| `MAX_TURNS_LIMIT` | `500` | Upper bound accepted by `CreateGroup` / `SetMaxTurns` |
+| `MESSAGE_RETENTION` | `2000` | Messages kept per group; older rows are pruned by the sweeper |
+
+Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + token hash, plus an overall per-IP cap) and return `429` with `Retry-After`. Admin sessions are stored in `admin_sessions`, so logout and "revoke all sessions" invalidate cookies server-side.
+
+**Fly.io:** SQLite lives on a machine-local `/data` volume. Keep `min_machines_running = 1`; scaling to more machines creates independent databases. Migrate to a shared database before horizontal scaling. `fly.toml` pins `deploy.strategy = "immediate"` to avoid two machines racing for the same volume during deploy. Add Litestream or scheduled `.backup` snapshots: a single machine volume is a single point of failure.
 
 ## API summary
 
