@@ -1,6 +1,10 @@
 # Gitleaks ignore file
 # False positives in git history: test dummy token, package lock hashes, git tree hashes in e2e cache, and built frontend artifact public keys.
 0685938d25f0c691be12549999e00d055494202c:internal/store/crypto_test.go:generic-api-key:14
+de5f72aba18241bf12dfb475386553dc54e4109b:internal/store/crypto_test.go:generic-api-key:11
+4ea226c6acb8344272236100de3cfcb640e2002e:internal/store/crypto_test.go:generic-api-key:67
+a94bc3be8922f4f4657e201dd78882cb5dce8cc3:cmd/server/main_test.go:generic-api-key:29
+a94bc3be8922f4f4657e201dd78882cb5dce8cc3:cmd/server/main_test.go:generic-api-key:96
 9ddead5466e870b3fa4bee3d896b90e69d8c2b56:mops.lock:generic-api-key:47
 9ddead5466e870b3fa4bee3d896b90e69d8c2b56:mops.lock:generic-api-key:60
 9ddead5466e870b3fa4bee3d896b90e69d8c2b56:tests/e2e/.cache/trees.json:generic-api-key:1
