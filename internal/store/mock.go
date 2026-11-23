@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -79,22 +80,18 @@ func dueMockSpeaker(ctx context.Context, q querier, groupID, nowMs int64) (*Grou
 // processDueMockTx applies a due mock reply for one group: if the current
 // speaker is a mock past mockDelaySec, it posts the mock message and
 // advances the turn. No-op otherwise.
-func processDueMockTx(ctx context.Context, conn *sql.Conn, groupID int64, nowMs int64) error {
+func (s *Store) processDueMockTx(ctx context.Context, conn *sql.Conn, groupID int64, nowMs int64) error {
 	g, speaker, err := dueMockSpeaker(ctx, conn, groupID, nowMs)
 	if err != nil || g == nil {
 		return err
 	}
-	ms, err := loadMembers(ctx, conn, groupID)
+	ms, err := s.loadMembersLive(ctx, conn, groupID, nowMs)
 	if err != nil {
 		return err
 	}
-	msgs, err := loadMessages(ctx, conn, groupID)
+	last, err := loadLastMessage(ctx, conn, groupID)
 	if err != nil {
 		return err
-	}
-	var last *Message
-	if len(msgs) > 0 {
-		last = &msgs[len(msgs)-1]
 	}
 	seq := g.TurnSeq
 	if _, err := insertMessage(ctx, conn, &Message{
@@ -106,139 +103,75 @@ func processDueMockTx(ctx context.Context, conn *sql.Conn, groupID int64, nowMs 
 	}
 	g.SkipStreak = 0
 	advanceAfterReply(g, ms, nowMs)
-	return saveGroup(ctx, conn, g)
+	return s.saveGroup(ctx, conn, g)
 }
 
 // ProcessDueMock applies a due mock reply for one group (public wrapper).
 func (s *Store) ProcessDueMock(ctx context.Context, groupID int64, nowMs int64) error {
-	return s.immediateTx(ctx, func(conn *sql.Conn) error {
-		return processDueMockTx(ctx, conn, groupID, nowMs)
+	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		return s.processDueMockTx(ctx, conn, groupID, nowMs)
 	})
 }
 
-// SweepDueMocks applies every due mock reply across all groups — the safety
-// net run by the background ticker (Motoko's 15-second recurring timer).
-func (s *Store) SweepDueMocks(ctx context.Context, nowMs int64) error {
-	rows, err := s.db.QueryContext(ctx, "SELECT id FROM groups")
-	if err != nil {
-		return err
-	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, id := range ids {
-		if err := s.ProcessDueMock(ctx, id, nowMs); err != nil {
-			return fmt.Errorf("group %d: %w", id, err)
-		}
-	}
-	return nil
+// DueState is the next automatic action for a running group: a mock reply
+// after mockDelaySec, or a silent-bot timeout after turnTimeoutSec.
+type DueState struct {
+	Kind  string // "" | "mock" | "timeout"
+	DueAt int64
 }
 
-// ProcessExpiredTurn skips a silent real bot after timeoutMs. The whole
-// read-check-rotate sequence runs inside BEGIN IMMEDIATE, so a late reply
-// racing the sweeper is either fully accepted or fully rejected.
-func (s *Store) ProcessExpiredTurn(ctx context.Context, groupID, nowMs, timeoutMs int64) error {
+// NextDue reports when the current turn becomes due, using only the read
+// pool: the group row plus the current speaker's is_mock flag.
+func (s *Store) NextDue(ctx context.Context, groupID, nowMs, timeoutMs int64) (DueState, error) {
 	if timeoutMs <= 0 {
 		timeoutMs = s.turnTimeoutMs
 	}
-	return s.immediateTx(ctx, func(conn *sql.Conn) error {
-		g, err := loadGroup(ctx, conn, groupID)
-		if err != nil {
-			if err == ErrNotFound {
-				return nil
-			}
-			return err
-		}
-		if g.Status != "running" || g.CurrentTurnBotID == nil {
-			return nil
-		}
-		ms, err := loadMembers(ctx, conn, groupID)
-		if err != nil {
-			return err
-		}
-		var speaker *Member
-		for i := range ms {
-			if ms[i].BotID == *g.CurrentTurnBotID {
-				speaker = &ms[i]
-				break
-			}
-		}
-		// Mock speakers have their own short delay and are handled by
-		// processDueMockTx; only real bots need the long timeout.
-		if speaker == nil || speaker.IsMock {
-			return nil
-		}
-		if nowMs-g.TurnStartedAt < timeoutMs {
-			return nil
-		}
-
-		// CAS: re-read happens under the write lock above; capture the
-		// values so a late reply with the old turnSeq can no longer win.
-		seq := g.TurnSeq
-		g.SkipStreak++
-		if g.SkipStreak >= int64(len(ms)) {
-			g.Status = "paused"
-			g.CurrentTurnBotID = nil
-			g.TurnQueue = []string{}
-			g.TurnStartedAt = nowMs
-			var names strings.Builder
-			for i, m := range ms {
-				if i > 0 {
-					names.WriteString("، ")
-				}
-				names.WriteString(m.Name)
-			}
-			event := "إيقاف تلقائي: لم يرد أي عضو بعد انتهاء مهلات متتالية. الأعضاء: " + names.String()
-			if _, err := insertMessage(ctx, conn, &Message{
-				GroupID: groupID, TurnSeq: &seq, SenderBotID: "system",
-				SenderName: "النظام", SenderColor: "#6B7280", Role: "bot",
-				Content: event, CreatedAt: nowMs,
-			}); err != nil {
-				return err
-			}
-			g.UpdatedAt = nowMs
-			return saveGroup(ctx, conn, g)
-		}
-		advanceAfterSkip(g, ms, nowMs)
-		return saveGroup(ctx, conn, g)
-	})
-}
-
-// SweepTurns applies due mock replies, silent-bot timeouts and session
-// cleanup. It is the single background tick used by the server.
-func (s *Store) SweepTurns(ctx context.Context, nowMs, timeoutMs int64) error {
-	ids, err := s.groupIDs(ctx)
+	g, err := loadGroup(ctx, s.ro, groupID)
 	if err != nil {
-		return err
-	}
-	// A failure in one group must not skip the remaining groups in this tick.
-	var firstErr error
-	record := func(label string, id int64, err error) {
-		if err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("%s group %d: %w", label, id, err)
+		if errors.Is(err, ErrNotFound) {
+			return DueState{}, nil
 		}
+		return DueState{}, err
 	}
-	for _, id := range ids {
-		record("mock", id, s.ProcessDueMock(ctx, id, nowMs))
-		record("timeout", id, s.ProcessExpiredTurn(ctx, id, nowMs, timeoutMs))
+	if g.Status != "running" || g.CurrentTurnBotID == nil {
+		return DueState{}, nil
 	}
-	record("sessions", 0, s.DeleteExpiredSessions(ctx, nowMs))
-	record("retention", 0, s.PruneOldMessages(ctx))
-	return firstErr
+	var isMock int
+	err = s.ro.QueryRowContext(ctx,
+		"SELECT is_mock FROM bot_members WHERE group_id = ? AND bot_id = ?",
+		groupID, *g.CurrentTurnBotID).Scan(&isMock)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DueState{}, nil
+	}
+	if err != nil {
+		return DueState{}, err
+	}
+	if isMock != 0 {
+		return DueState{Kind: "mock", DueAt: g.TurnStartedAt + g.MockDelaySec*1000}, nil
+	}
+	if timeoutMs <= 0 {
+		return DueState{}, nil
+	}
+	return DueState{Kind: "timeout", DueAt: g.TurnStartedAt + timeoutMs}, nil
 }
 
-func (s *Store) groupIDs(ctx context.Context) ([]int64, error) {
-	rows, err := s.ro.QueryContext(ctx, "SELECT id FROM groups")
+// ProcessDueGroup applies the due action for one group without taking the
+// write lock when nothing is due. The boolean reports whether the due window
+// was reached (the scheduler uses it to back off if the write was a no-op).
+func (s *Store) ProcessDueGroup(ctx context.Context, groupID, nowMs, timeoutMs int64) (bool, error) {
+	due, err := s.NextDue(ctx, groupID, nowMs, timeoutMs)
+	if err != nil || due.Kind == "" || nowMs < due.DueAt {
+		return false, err
+	}
+	if due.Kind == "mock" {
+		return true, s.ProcessDueMock(ctx, groupID, nowMs)
+	}
+	return true, s.ProcessExpiredTurn(ctx, groupID, nowMs, timeoutMs)
+}
+
+// RunningGroupIDs lists groups whose turn can expire, using idx_groups_status.
+func (s *Store) RunningGroupIDs(ctx context.Context) ([]int64, error) {
+	rows, err := s.ro.QueryContext(ctx, "SELECT id FROM groups WHERE status = 'running'")
 	if err != nil {
 		return nil, err
 	}
@@ -252,4 +185,117 @@ func (s *Store) groupIDs(ctx context.Context) ([]int64, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// RoomGroupForToken resolves a public agent token to its group without
+// loading any member fields (and never returning the token itself).
+func (s *Store) RoomGroupForToken(ctx context.Context, token string) (int64, bool, error) {
+	var groupID int64
+	err := s.ro.QueryRowContext(ctx,
+		"SELECT group_id FROM bot_members WHERE agent_token = ?", token).Scan(&groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return groupID, true, nil
+}
+
+// ProcessExpiredTurn skips a silent real bot after timeoutMs. The whole
+// read-check-rotate sequence runs inside BEGIN IMMEDIATE, so a late reply
+// racing the sweeper is either fully accepted or fully rejected.
+func (s *Store) ProcessExpiredTurn(ctx context.Context, groupID, nowMs, timeoutMs int64) error {
+	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		return s.processExpiredTurnTx(ctx, conn, groupID, nowMs, timeoutMs)
+	})
+}
+
+func (s *Store) processExpiredTurnTx(ctx context.Context, conn *sql.Conn, groupID, nowMs, timeoutMs int64) error {
+	if timeoutMs <= 0 {
+		timeoutMs = s.turnTimeoutMs
+	}
+	g, err := loadGroup(ctx, conn, groupID)
+	if err != nil {
+		if err == ErrNotFound {
+			return nil
+		}
+		return err
+	}
+	if g.Status != "running" || g.CurrentTurnBotID == nil {
+		return nil
+	}
+	ms, err := s.loadMembersLive(ctx, conn, groupID, nowMs)
+	if err != nil {
+		return err
+	}
+	var speaker *Member
+	for i := range ms {
+		if ms[i].BotID == *g.CurrentTurnBotID {
+			speaker = &ms[i]
+			break
+		}
+	}
+	// Mock speakers have their own short delay and are handled by
+	// processDueMockTx; only real bots need the long timeout.
+	if speaker == nil || speaker.IsMock {
+		return nil
+	}
+	if nowMs-g.TurnStartedAt < timeoutMs {
+		return nil
+	}
+
+	// CAS: re-read happens under the write lock above; capture the
+	// values so a late reply with the old turnSeq can no longer win.
+	seq := g.TurnSeq
+	g.SkipStreak++
+	if g.SkipStreak >= int64(len(ms)) {
+		g.Status = "paused"
+		g.CurrentTurnBotID = nil
+		g.TurnQueue = []string{}
+		g.TurnStartedAt = nowMs
+		var names strings.Builder
+		for i, m := range ms {
+			if i > 0 {
+				names.WriteString("، ")
+			}
+			names.WriteString(m.Name)
+		}
+		event := "إيقاف تلقائي: لم يرد أي عضو بعد انتهاء مهلات متتالية. الأعضاء: " + names.String()
+		if _, err := insertMessage(ctx, conn, &Message{
+			GroupID: groupID, TurnSeq: &seq, SenderBotID: "system",
+			SenderName: "النظام", SenderColor: "#6B7280", Role: "bot",
+			Content: event, CreatedAt: nowMs,
+		}); err != nil {
+			return err
+		}
+		g.UpdatedAt = nowMs
+		return s.saveGroup(ctx, conn, g)
+	}
+	advanceAfterSkip(g, ms, nowMs)
+	return s.saveGroup(ctx, conn, g)
+}
+
+// SweepTurns is the 15-second safety net: due mock replies, silent-bot
+// timeouts, expired sessions and message retention. Due checks are read-only,
+// so idle groups never take a write transaction.
+func (s *Store) SweepTurns(ctx context.Context, nowMs, timeoutMs int64) error {
+	ids, err := s.RunningGroupIDs(ctx)
+	if err != nil {
+		return err
+	}
+	// A failure in one group must not skip the remaining groups in this tick.
+	var firstErr error
+	record := func(label string, id int64, err error) {
+		if err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("%s group %d: %w", label, id, err)
+		}
+	}
+	for _, id := range ids {
+		_, err := s.ProcessDueGroup(ctx, id, nowMs, timeoutMs)
+		record("due", id, err)
+	}
+	record("sessions", 0, s.DeleteExpiredSessions(ctx, nowMs))
+	record("retention", 0, s.PruneOldMessages(ctx))
+	return firstErr
 }

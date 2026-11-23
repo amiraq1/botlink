@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -63,23 +65,30 @@ func SetMessageRetention(n int64) {
 }
 
 // PruneOldMessages keeps storage bounded by dropping messages beyond the
-// retention window (oldest first) from every group.
+// retention window (oldest first) from every group. It skips the scan
+// entirely when no message was inserted since the previous prune and uses a
+// single window-function statement instead of one delete per group.
 func (s *Store) PruneOldMessages(ctx context.Context) error {
 	if messageRetention <= 0 {
 		return nil
 	}
-	ids, err := s.groupIDs(ctx)
-	if err != nil {
+	var maxID int64
+	if err := s.ro.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM messages").Scan(&maxID); err != nil {
 		return err
 	}
-	for _, id := range ids {
-		if _, err := s.db.ExecContext(ctx,
-			`DELETE FROM messages WHERE group_id = ? AND id NOT IN
-			 (SELECT id FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT ?)`,
-			id, id, messageRetention); err != nil {
-			return err
-		}
+	if maxID == s.lastPruneMaxID.Load() {
+		return nil
 	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM messages WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY id DESC) AS rn
+				FROM messages
+			) WHERE rn > ?
+		)`, messageRetention); err != nil {
+		return err
+	}
+	s.lastPruneMaxID.Store(maxID)
 	return nil
 }
 
@@ -195,6 +204,17 @@ type CreateGroupInput struct {
 // Store
 // ---------------------------------------------------------------------------
 
+type presenceEntry struct {
+	at      int64
+	groupID int64
+	botID   string
+}
+
+type presenceTouch struct {
+	token string
+	nowMs int64
+}
+
 type Store struct {
 	// db is the single writer connection. All mutations run through
 	// immediateTx on this pool (MaxOpenConns=1), so BEGIN IMMEDIATE never
@@ -204,9 +224,18 @@ type Store struct {
 	// writer is active, so polling never queues behind a write transaction.
 	ro *sql.DB
 
-	presenceMu  sync.Mutex
-	presence    map[string]int64
-	lastPruneMs int64
+	presenceMu   sync.Mutex
+	presence     map[string]presenceEntry
+	lastPruneMs  int64
+	presenceCh   chan presenceTouch
+	presenceStop chan struct{}
+	presenceWG   sync.WaitGroup
+	closeOnce    sync.Once
+
+	lastPruneMaxID atomic.Int64
+
+	changeMu sync.Mutex
+	onChange func(int64)
 
 	turnTimeoutMs int64
 }
@@ -214,11 +243,42 @@ type Store struct {
 const (
 	// PresenceWriteInterval is the minimum gap between two database writes
 	// of the same member's last_seen_at. 30s stays inside the 45s online
-	// window while turning most room GETs into pure reads.
+	// window while turning almost every room GET into a pure read.
 	PresenceWriteInterval = int64(30_000)
 	presencePruneInterval = int64(5 * 60_000)
+	presenceFlushInterval = time.Second
+	presenceQueueSize     = 1024
 	DefaultReadPoolSize   = 4
+	maxReadPoolSize       = 16
 )
+
+// SetChangeHook registers a callback invoked after a group row is saved, so
+// the HTTP layer can push live events and wake its turn scheduler.
+func (s *Store) SetChangeHook(fn func(groupID int64)) {
+	s.changeMu.Lock()
+	s.onChange = fn
+	s.changeMu.Unlock()
+}
+
+func (s *Store) notifyGroup(id int64) {
+	s.changeMu.Lock()
+	fn := s.onChange
+	s.changeMu.Unlock()
+	if fn != nil {
+		fn(id)
+	}
+}
+
+func readPoolSize() int {
+	n := runtime.NumCPU()
+	if n < DefaultReadPoolSize {
+		n = DefaultReadPoolSize
+	}
+	if n > maxReadPoolSize {
+		n = maxReadPoolSize
+	}
+	return n
+}
 
 // Open creates parent directories, opens (or creates) the SQLite database
 // and applies the schema with WAL mode, foreign keys and a busy timeout.
@@ -238,10 +298,15 @@ func Open(path string) (*Store, error) {
 	db.SetMaxIdleConns(1)
 	s := &Store{
 		db:            db,
-		presence:      map[string]int64{},
+		presence:      map[string]presenceEntry{},
+		presenceCh:    make(chan presenceTouch, presenceQueueSize),
+		presenceStop:  make(chan struct{}),
 		lastPruneMs:   time.Now().UnixMilli(),
 		turnTimeoutMs: DefaultTurnTimeoutSec * 1000,
 	}
+	// MaxOpenConns=1 pins every PRAGMA below to the single writer conn.
+	// Read-side tuning (temp_store, cache_size, mmap) travels in the read DSN:
+	// on the writer those pragmas measurably slowed small commits.
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
@@ -259,46 +324,59 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 
-	// Read-only pool. modernc.org/sqlite accepts file:<path>?mode=ro.
-	ro, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro")
+	// Read-only pool. PRAGMAs are per connection, so they travel in the DSN:
+	// every pooled reader gets them, not just the first one Exec ran on.
+	// mmap is read-pool-only: memory-mapped reads are much faster, while the
+	// single writer commits small transactions and pays the dirty-page cost.
+	roDSN := "file:" + filepath.ToSlash(path) + "?mode=ro" +
+		"&_pragma=busy_timeout(5000)&_pragma=query_only(1)" +
+		"&_pragma=temp_store(2)&_pragma=cache_size(-20000)&_pragma=mmap_size(67108864)"
+	ro, err := sql.Open("sqlite", roDSN)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open read pool: %w", err)
 	}
-	ro.SetMaxOpenConns(DefaultReadPoolSize)
-	ro.SetMaxIdleConns(DefaultReadPoolSize)
-	for _, p := range []string{"PRAGMA busy_timeout=5000", "PRAGMA query_only=ON"} {
-		if _, err := ro.Exec(p); err != nil {
-			ro.Close()
-			db.Close()
-			return nil, fmt.Errorf("%s: %w", p, err)
-		}
+	poolSize := readPoolSize()
+	ro.SetMaxOpenConns(poolSize)
+	ro.SetMaxIdleConns(poolSize)
+	if err := ro.Ping(); err != nil {
+		ro.Close()
+		db.Close()
+		return nil, fmt.Errorf("ping read pool: %w", err)
 	}
 	s.ro = ro
+
+	s.presenceWG.Add(1)
+	go s.presenceLoop()
 	return s, nil
 }
 
 func (s *Store) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.presenceStop)
+		s.presenceWG.Wait()
+	})
 	if s.ro != nil {
 		_ = s.ro.Close()
 	}
 	return s.db.Close()
 }
 
-// touchPresence records a room touch, writing to the database at most once
-// per PresenceWriteInterval per token. Entries are pruned by TTL so a flood
-// of random tokens cannot grow the map without bound.
-func (s *Store) touchPresence(ctx context.Context, token string, nowMs int64) {
+// touchPresence records a room touch. It never touches SQL: the coalescing
+// map is updated in memory and a single opaque touch is queued for the
+// background flusher, so a room read never waits on the writer lock.
+// Entries are pruned by TTL so a flood of random tokens cannot grow the map.
+func (s *Store) touchPresence(m Member, nowMs int64) {
 	s.presenceMu.Lock()
-	last := s.presence[token]
-	if nowMs-last < PresenceWriteInterval {
+	prev, seen := s.presence[m.AgentToken]
+	if seen && nowMs-prev.at < PresenceWriteInterval {
 		s.presenceMu.Unlock()
 		return
 	}
-	s.presence[token] = nowMs
+	s.presence[m.AgentToken] = presenceEntry{at: nowMs, groupID: m.GroupID, botID: m.BotID}
 	if nowMs-s.lastPruneMs > presencePruneInterval {
-		for k, t := range s.presence {
-			if nowMs-t > presencePruneInterval {
+		for k, e := range s.presence {
+			if nowMs-e.at > presencePruneInterval {
 				delete(s.presence, k)
 			}
 		}
@@ -307,8 +385,8 @@ func (s *Store) touchPresence(ctx context.Context, token string, nowMs int64) {
 	// Only 1..~4 entries can be pruned per call at steady state; cap the
 	// map explicitly so an attacker with random tokens cannot exhaust RAM.
 	if len(s.presence) > 8192 {
-		for k, t := range s.presence {
-			if nowMs-t > PresenceWriteInterval {
+		for k, e := range s.presence {
+			if nowMs-e.at > PresenceWriteInterval {
 				delete(s.presence, k)
 			}
 			if len(s.presence) <= 4096 {
@@ -316,12 +394,90 @@ func (s *Store) touchPresence(ctx context.Context, token string, nowMs int64) {
 			}
 		}
 	}
+	queued := true
+	select {
+	case s.presenceCh <- presenceTouch{token: m.AgentToken, nowMs: nowMs}:
+	default:
+		queued = false
+	}
+	if !queued {
+		// The queue is full: forget the coalescing mark so the next touch
+		// retries instead of suppressing a presence write for 30 seconds.
+		if seen {
+			s.presence[m.AgentToken] = prev
+		} else {
+			delete(s.presence, m.AgentToken)
+		}
+	}
 	s.presenceMu.Unlock()
+}
 
-	// Errors are deliberately ignored, as in the previous inline UPDATE:
-	// presence is best-effort and must never fail a room read.
-	_, _ = s.db.ExecContext(ctx,
-		"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", nowMs, token)
+// FlushPresence drains the queue and writes every pending last_seen_at in a
+// single transaction. Safe to call concurrently with touchPresence.
+func (s *Store) FlushPresence(ctx context.Context) error {
+	pending := make(map[string]int64, len(s.presenceCh))
+	for {
+		select {
+		case p := <-s.presenceCh:
+			if p.nowMs > pending[p.token] {
+				pending[p.token] = p.nowMs
+			}
+			continue
+		default:
+		}
+		break
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		stmt, err := conn.PrepareContext(ctx,
+			"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?")
+		if err != nil {
+			return err
+		}
+		defer stmt.Close()
+		for token, at := range pending {
+			if _, err := stmt.ExecContext(ctx, at, token); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (s *Store) presenceLoop() {
+	defer s.presenceWG.Done()
+	ticker := time.NewTicker(presenceFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.presenceStop:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = s.FlushPresence(ctx)
+			cancel()
+		}
+	}
+}
+
+// onlinePresence returns the bot IDs of one group that touched the room
+// within the online window, so a member's first read already sees itself
+// online even though the database write is still queued.
+func (s *Store) onlinePresence(groupID, nowMs int64) map[string]bool {
+	s.presenceMu.Lock()
+	defer s.presenceMu.Unlock()
+	var out map[string]bool
+	for _, e := range s.presence {
+		if e.groupID == groupID && nowMs-e.at <= OnlineWindowMs {
+			if out == nil {
+				out = map[string]bool{}
+			}
+			out[e.botID] = true
+		}
+	}
+	return out
 }
 
 // SetTurnTimeout configures the sweep timeout for silent real bots.
@@ -379,7 +535,12 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, id);
-CREATE INDEX IF NOT EXISTS idx_members_group ON bot_members(group_id, bot_id);
+CREATE INDEX IF NOT EXISTS idx_members_group_mock ON bot_members(group_id, is_mock);
+CREATE INDEX IF NOT EXISTS idx_groups_updated ON groups(updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_groups_status ON groups(status);
+CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_at);
+DROP INDEX IF EXISTS idx_members_group;
+DROP INDEX IF EXISTS idx_members_presence;
 `)
 	if err != nil {
 		return err
@@ -424,8 +585,10 @@ func ctxQuery(ctx context.Context, db *sql.DB, query string) (*sql.Rows, error) 
 }
 
 // immediateTx runs fn inside a SQLite BEGIN IMMEDIATE transaction on a
-// dedicated connection, so every turn mutation is atomic.
-func (s *Store) immediateTx(ctx context.Context, fn func(conn *sql.Conn) error) error {
+// dedicated connection, so every turn mutation is atomic. Group changes are
+// collected during the transaction and published only after COMMIT, so a
+// woken reader can never observe the pre-commit snapshot.
+func (s *Store) immediateTx(ctx context.Context, fn func(ctx context.Context, conn *sql.Conn) error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
@@ -434,12 +597,32 @@ func (s *Store) immediateTx(ctx context.Context, fn func(conn *sql.Conn) error) 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return err
 	}
-	if err := fn(conn); err != nil {
+	changes := &txChanges{ids: map[int64]struct{}{}}
+	txCtx := context.WithValue(ctx, txChangesKey{}, changes)
+	if err := fn(txCtx, conn); err != nil {
 		_, _ = conn.ExecContext(ctx, "ROLLBACK")
 		return err
 	}
-	_, err = conn.ExecContext(ctx, "COMMIT")
-	return err
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	for id := range changes.ids {
+		s.notifyGroup(id)
+	}
+	return nil
+}
+
+type txChanges struct {
+	ids map[int64]struct{}
+}
+
+type txChangesKey struct{}
+
+// noteChange records a group change for post-commit notification.
+func noteChange(ctx context.Context, id int64) {
+	if changes, ok := ctx.Value(txChangesKey{}).(*txChanges); ok {
+		changes.ids[id] = struct{}{}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +790,65 @@ func loadMembers(ctx context.Context, q querier, groupID int64) ([]Member, error
 	return ms, nil
 }
 
+// loadMembersLite is the public-room projection: no agent_token is ever
+// selected on the anonymous path.
+func loadMembersLite(ctx context.Context, q querier, groupID int64) ([]Member, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, last_seen_at
+		 FROM bot_members WHERE group_id = ?`, groupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ms []Member
+	for rows.Next() {
+		var m Member
+		var isMock int
+		if err := rows.Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
+			&isMock, &m.LastSeenAt); err != nil {
+			return nil, err
+		}
+		m.IsMock = isMock != 0
+		ms = append(ms, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortMembers(ms)
+	if ms == nil {
+		ms = []Member{}
+	}
+	return ms, nil
+}
+
+// markPresenceOnline folds queued presence into already-loaded members in
+// place (token lookup, no map allocation on the write path).
+func (s *Store) markPresenceOnline(groupID int64, ms []Member, nowMs int64) {
+	s.presenceMu.Lock()
+	defer s.presenceMu.Unlock()
+	if len(s.presence) == 0 {
+		return
+	}
+	for i := range ms {
+		e, ok := s.presence[ms[i].AgentToken]
+		if ok && e.groupID == groupID && nowMs-e.at <= OnlineWindowMs {
+			ms[i].LastSeenAt = nowMs
+		}
+	}
+}
+
+// loadMembersLive loads members and folds in queued presence, so turn
+// routing sees a bot that just polled the room even before the batched
+// last_seen_at write lands.
+func (s *Store) loadMembersLive(ctx context.Context, q querier, groupID, nowMs int64) ([]Member, error) {
+	ms, err := loadMembers(ctx, q, groupID)
+	if err != nil {
+		return nil, err
+	}
+	s.markPresenceOnline(groupID, ms, nowMs)
+	return ms, nil
+}
+
 // loadMemberByToken returns nil (not an error) for an unknown token.
 func loadMemberByToken(ctx context.Context, q querier, token string) (*Member, error) {
 	var m Member
@@ -626,10 +868,12 @@ func loadMemberByToken(ctx context.Context, q querier, token string) (*Member, e
 	return &m, nil
 }
 
-func loadMessages(ctx context.Context, q querier, groupID int64) ([]Message, error) {
+// loadLastMessage returns the newest message of a group (nil when empty),
+// so mock replies can quote without loading the whole buffered history.
+func loadLastMessage(ctx context.Context, q querier, groupID int64) (*Message, error) {
 	rows, err := q.QueryContext(ctx,
 		`SELECT id, group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at
-		 FROM messages WHERE group_id = ? ORDER BY id ASC`, groupID)
+		 FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT 1`, groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -638,7 +882,10 @@ func loadMessages(ctx context.Context, q querier, groupID int64) ([]Message, err
 	if err != nil {
 		return nil, err
 	}
-	return msgs, nil
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	return &msgs[0], nil
 }
 
 // loadMessagesPage loads at most limit messages. beforeID/afterID are
@@ -710,7 +957,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 	return msgs, nil
 }
 
-func saveGroup(ctx context.Context, q querier, g *Group) error {
+func (s *Store) saveGroup(ctx context.Context, q querier, g *Group) error {
 	queue, _ := json.Marshal(g.TurnQueue)
 	if queue == nil {
 		queue = []byte("[]")
@@ -727,13 +974,16 @@ func saveGroup(ctx context.Context, q querier, g *Group) error {
 	if !ok {
 		return errors.New("store: querier does not support ExecContext")
 	}
-	_, err := ex.ExecContext(ctx,
+	if _, err := ex.ExecContext(ctx,
 		`UPDATE groups SET name=?, description=?, topic=?, status=?, turn_mode=?, max_turns=?,
 		 turn_seq=?, current_turn_bot_id=?, turn_queue=?, mock_delay_sec=?, turn_started_at=?,
 		 skip_streak=?, updated_at=? WHERE id=?`,
 		g.Name, g.Description, g.Topic, g.Status, g.TurnMode, g.MaxTurns, g.TurnSeq,
-		current, string(queue), g.MockDelaySec, g.TurnStartedAt, g.SkipStreak, g.UpdatedAt, g.ID)
-	return err
+		current, string(queue), g.MockDelaySec, g.TurnStartedAt, g.SkipStreak, g.UpdatedAt, g.ID); err != nil {
+		return err
+	}
+	noteChange(ctx, g.ID)
+	return nil
 }
 
 func insertMessage(ctx context.Context, q querier, m *Message) (int64, error) {
