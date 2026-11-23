@@ -695,3 +695,198 @@ VALUES (1, 'bot_1', 'Legacy Bot', 'legacy-plain-token-xyz-12345');
 		t.Fatalf("GetGroupDetail member token = %q; want legacy-plain-token-xyz-12345", detail.Members[0].AgentToken)
 	}
 }
+
+func TestMigrationsUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migration_upgrade.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+
+	// Setup schema_migrations at version 1 only
+	_, err = rawDB.Exec(`
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at INTEGER NOT NULL
+);
+INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, '001_initial_tables', 1000);
+
+CREATE TABLE groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  topic TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'waiting_for_leader',
+  turn_mode TEXT NOT NULL DEFAULT 'auto_round_robin',
+  max_turns INTEGER NOT NULL DEFAULT 20,
+  turn_seq INTEGER NOT NULL DEFAULT 1,
+  current_turn_bot_id TEXT,
+  turn_queue TEXT NOT NULL DEFAULT '[]',
+  mock_delay_sec INTEGER NOT NULL DEFAULT 12,
+  turn_started_at INTEGER NOT NULL DEFAULT 0,
+  skip_streak INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE bot_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  role_title TEXT NOT NULL DEFAULT '',
+  accent_color TEXT NOT NULL DEFAULT '',
+  is_mock INTEGER NOT NULL DEFAULT 0,
+  agent_token TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL DEFAULT '',
+  token_enc TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, bot_id)
+);
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  turn_seq INTEGER,
+  sender_bot_id TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  sender_color TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'bot',
+  content TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE admin_sessions (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL DEFAULT 0,
+  revoked_at INTEGER
+);
+
+INSERT INTO groups (id, name, status, turn_seq, max_turns) VALUES (1, 'Upgrade Test Group', 'running', 1, 10);
+INSERT INTO bot_members (group_id, bot_id, name, token_hash) VALUES (1, 'bot_1', 'Bot 1', 'h1');
+INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, content, created_at)
+VALUES (1, 1, 'bot_1', 'Bot 1', 'first message', 1000);
+`)
+	if err != nil {
+		rawDB.Close()
+		t.Fatalf("setup v1 schema: %v", err)
+	}
+	rawDB.Close()
+
+	// Open with store.Open which must run migrations up to latest version (version 2)
+	testKey := []byte("01234567890123456789012345678901")
+	st, err := Open(dbPath, testKey)
+	if err != nil {
+		t.Fatalf("Open store with migrations: %v", err)
+	}
+	defer st.Close()
+
+	// Check schema_migrations has version 2
+	var v2Count int
+	if err := st.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = 2").Scan(&v2Count); err != nil {
+		t.Fatalf("query schema_migrations: %v", err)
+	}
+	if v2Count != 1 {
+		t.Fatalf("expected version 2 in schema_migrations, got count=%d", v2Count)
+	}
+
+	// Verify unique index idx_messages_group_turn prevents duplicate (group_id, turn_seq)
+	_, err = st.db.Exec("INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, content, created_at) VALUES (1, 1, 'bot_1', 'Bot 1', 'duplicate turn seq', 2000)")
+	if err == nil {
+		t.Fatal("expected UNIQUE constraint violation on duplicate (group_id, turn_seq), but insert succeeded")
+	}
+
+	// Messages with NULL turn_seq are allowed multiple times
+	_, err = st.db.Exec("INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, content, created_at) VALUES (1, NULL, 'bot_1', 'Bot 1', 'system message 1', 3000)")
+	if err != nil {
+		t.Fatalf("insert NULL turn_seq 1 failed: %v", err)
+	}
+	_, err = st.db.Exec("INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, content, created_at) VALUES (1, NULL, 'bot_1', 'Bot 1', 'system message 2', 4000)")
+	if err != nil {
+		t.Fatalf("insert NULL turn_seq 2 failed: %v", err)
+	}
+}
+
+func TestBackupAndRestore(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "live.db")
+	backupDir := filepath.Join(dir, "backups")
+
+	testKey := []byte("01234567890123456789012345678901")
+	st, err := Open(dbPath, testKey)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+
+	gid, err := st.CreateGroup(ctx, CreateGroupInput{
+		Name:     "Backup Test Group",
+		TurnMode: "auto_round_robin",
+		MaxTurns: 20,
+		Members: []MemberInput{
+			{Name: "Bot1", RoleTitle: "Worker", AccentColor: "#3b82f6"},
+			{Name: "Bot2", RoleTitle: "Reviewer", AccentColor: "#10b981"},
+		},
+	}, now)
+	if err != nil {
+		t.Fatalf("CreateGroup: %v", err)
+	}
+
+	// Create 3 backups with maxKeep = 2
+	bak1, err := st.Backup(ctx, backupDir, 2)
+	if err != nil {
+		t.Fatalf("Backup 1: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	bak2, err := st.Backup(ctx, backupDir, 2)
+	if err != nil {
+		t.Fatalf("Backup 2: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	bak3, err := st.Backup(ctx, backupDir, 2)
+	if err != nil {
+		t.Fatalf("Backup 3: %v", err)
+	}
+
+	// Verify rotation kept at most 2 backups: bak1 was deleted, bak2 and bak3 exist
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		t.Fatalf("ReadDir backupDir: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 backup files after rotation, got %d", len(entries))
+	}
+	if _, err := os.Stat(bak1); !os.IsNotExist(err) {
+		t.Errorf("expected oldest backup %s to be rotated out, but it still exists", bak1)
+	}
+	if _, err := os.Stat(bak2); err != nil {
+		t.Errorf("expected backup %s to exist, got err: %v", bak2, err)
+	}
+	if _, err := os.Stat(bak3); err != nil {
+		t.Errorf("expected newest backup %s to exist, got err: %v", bak3, err)
+	}
+
+	// Verify restore by opening backup database directly
+	restoredStore, err := Open(bak3, testKey)
+	if err != nil {
+		t.Fatalf("Open restored backup: %v", err)
+	}
+	defer restoredStore.Close()
+
+	detail, err := restoredStore.GetGroupDetail(ctx, gid, now)
+	if err != nil {
+		t.Fatalf("GetGroupDetail on restored backup: %v", err)
+	}
+	if detail.Group.Name != "Backup Test Group" {
+		t.Fatalf("expected restored group name %q, got %q", "Backup Test Group", detail.Group.Name)
+	}
+	if len(detail.Members) != 2 {
+		t.Fatalf("expected 2 members in restored backup, got %d", len(detail.Members))
+	}
+}

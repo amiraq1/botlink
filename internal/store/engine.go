@@ -745,7 +745,7 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 			return err
 		}
 		if g.Status == "completed" || g.Status == "stopped" {
-			return wrapErr(ErrValidation, "cannot rotate token for "+g.Status+" group")
+			return wrapErr(ErrValidation, "Cannot rotate token on a "+g.Status+" group")
 		}
 		res, err := conn.ExecContext(ctx,
 			"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = '' WHERE group_id = ? AND bot_id = ?",

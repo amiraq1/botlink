@@ -61,3 +61,24 @@ func TestTokenCrypto(t *testing.T) {
 		t.Fatal("expected decryption error on corrupted ciphertext")
 	}
 }
+
+func TestMemberAADDecryptionRejectsDifferentMember(t *testing.T) {
+	key := []byte("01234567890123456789012345678901")
+	token := "4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d"
+
+	enc1, err := EncryptToken(key, token, MemberAAD("bot_1"))
+	if err != nil {
+		t.Fatalf("encrypt bot_1: %v", err)
+	}
+
+	// Decrypting with bot_1 AAD succeeds
+	dec1, err := DecryptToken(key, enc1, MemberAAD("bot_1"))
+	if err != nil || dec1 != token {
+		t.Fatalf("expected successful decryption for bot_1, got dec=%q err=%v", dec1, err)
+	}
+
+	// Attempting to decrypt bot_1's ciphertext with bot_2's AAD MUST fail
+	if _, err := DecryptToken(key, enc1, MemberAAD("bot_2")); err == nil {
+		t.Fatal("security violation: ciphertext of bot_1 successfully decrypted using bot_2's AAD")
+	}
+}

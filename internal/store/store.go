@@ -208,9 +208,10 @@ type CreateGroupInput struct {
 // ---------------------------------------------------------------------------
 
 type presenceEntry struct {
-	at      int64
-	groupID int64
-	botID   string
+	lastSeenMs int64
+	lastDBMs   int64
+	groupID    int64
+	botID      string
 }
 
 type presenceTouch struct {
@@ -233,6 +234,7 @@ type Store struct {
 
 	presenceMu   sync.Mutex
 	presence     map[string]presenceEntry
+	botSeen      map[int64]map[string]int64
 	lastPruneMs  int64
 	presenceCh   chan presenceTouch
 	presenceStop chan struct{}
@@ -323,6 +325,7 @@ func Open(path string, encryptionKey ...[]byte) (*Store, error) {
 		dbPath:        path,
 		db:            db,
 		presence:      map[string]presenceEntry{},
+		botSeen:       map[int64]map[string]int64{},
 		presenceCh:    make(chan presenceTouch, presenceQueueSize),
 		presenceStop:  make(chan struct{}),
 		lastPruneMs:   time.Now().UnixMilli(),
@@ -339,6 +342,7 @@ func Open(path string, encryptionKey ...[]byte) (*Store, error) {
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA busy_timeout=5000",
 		"PRAGMA synchronous=NORMAL",
+		"PRAGMA journal_size_limit=67108864",
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
@@ -382,6 +386,9 @@ func (s *Store) Close() error {
 	s.closeOnce.Do(func() {
 		close(s.presenceStop)
 		s.presenceWG.Wait()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = s.FlushPresence(ctx)
+		cancel()
 	})
 	if s.ro != nil {
 		_ = s.ro.Close()
@@ -389,31 +396,68 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// touchPresence records a room touch. It never touches SQL: the coalescing
-// map is updated in memory and a single opaque touch is queued for the
-// background flusher, so a room read never waits on the writer lock.
-// Entries are pruned by TTL so a flood of random tokens cannot grow the map.
+// touchPresence records a room touch. It updates the in-memory presence on
+// EVERY request so the online decision is always instant and accurate.
+// Writes to SQLite are queued periodically (at most once every 30 seconds)
+// so a polling room never blocks on database transactions.
 func (s *Store) touchPresence(m Member, nowMs int64) {
 	s.presenceMu.Lock()
-	prev, seen := s.presence[m.AgentToken]
-	if seen && nowMs-prev.at < PresenceWriteInterval {
-		s.presenceMu.Unlock()
-		return
+	defer s.presenceMu.Unlock()
+
+	// Update botSeen map for fast group-level online lookups
+	if s.botSeen[m.GroupID] == nil {
+		s.botSeen[m.GroupID] = map[string]int64{}
 	}
-	s.presence[m.AgentToken] = presenceEntry{at: nowMs, groupID: m.GroupID, botID: m.BotID}
+	s.botSeen[m.GroupID][m.BotID] = nowMs
+
+	entry, seen := s.presence[m.AgentToken]
+	if !seen {
+		entry = presenceEntry{
+			lastSeenMs: nowMs,
+			lastDBMs:   nowMs,
+			groupID:    m.GroupID,
+			botID:      m.BotID,
+		}
+		s.presence[m.AgentToken] = entry
+		select {
+		case s.presenceCh <- presenceTouch{token: m.AgentToken, nowMs: nowMs}:
+		default:
+		}
+	} else {
+		// In-memory presence is always refreshed on every request
+		entry.lastSeenMs = nowMs
+		// Database write is queued only if PresenceWriteInterval elapsed
+		if nowMs-entry.lastDBMs >= PresenceWriteInterval {
+			entry.lastDBMs = nowMs
+			select {
+			case s.presenceCh <- presenceTouch{token: m.AgentToken, nowMs: nowMs}:
+			default:
+			}
+		}
+		s.presence[m.AgentToken] = entry
+	}
+
 	if nowMs-s.lastPruneMs > presencePruneInterval {
 		for k, e := range s.presence {
-			if nowMs-e.at > presencePruneInterval {
+			if nowMs-e.lastSeenMs > presencePruneInterval {
 				delete(s.presence, k)
+			}
+		}
+		for gid, bmap := range s.botSeen {
+			for bid, at := range bmap {
+				if nowMs-at > presencePruneInterval {
+					delete(bmap, bid)
+				}
+			}
+			if len(bmap) == 0 {
+				delete(s.botSeen, gid)
 			}
 		}
 		s.lastPruneMs = nowMs
 	}
-	// Only 1..~4 entries can be pruned per call at steady state; cap the
-	// map explicitly so an attacker with random tokens cannot exhaust RAM.
 	if len(s.presence) > 8192 {
 		for k, e := range s.presence {
-			if nowMs-e.at > PresenceWriteInterval {
+			if nowMs-e.lastSeenMs > PresenceWriteInterval {
 				delete(s.presence, k)
 			}
 			if len(s.presence) <= 4096 {
@@ -421,22 +465,6 @@ func (s *Store) touchPresence(m Member, nowMs int64) {
 			}
 		}
 	}
-	queued := true
-	select {
-	case s.presenceCh <- presenceTouch{token: m.AgentToken, nowMs: nowMs}:
-	default:
-		queued = false
-	}
-	if !queued {
-		// The queue is full: forget the coalescing mark so the next touch
-		// retries instead of suppressing a presence write for 30 seconds.
-		if seen {
-			s.presence[m.AgentToken] = prev
-		} else {
-			delete(s.presence, m.AgentToken)
-		}
-	}
-	s.presenceMu.Unlock()
 }
 
 // FlushPresence drains the queue and writes every pending last_seen_at in a
@@ -497,8 +525,19 @@ func (s *Store) onlinePresence(groupID, nowMs int64) map[string]bool {
 	s.presenceMu.Lock()
 	defer s.presenceMu.Unlock()
 	var out map[string]bool
+	if mGroup, ok := s.botSeen[groupID]; ok {
+		for botID, seenAt := range mGroup {
+			if nowMs-seenAt <= OnlineWindowMs {
+				if out == nil {
+					out = map[string]bool{}
+				}
+				out[botID] = true
+			}
+		}
+	}
+	// Fallback to presence token map for any unmapped tokens
 	for _, e := range s.presence {
-		if e.groupID == groupID && nowMs-e.at <= OnlineWindowMs {
+		if e.groupID == groupID && nowMs-e.lastSeenMs <= OnlineWindowMs {
 			if out == nil {
 				out = map[string]bool{}
 			}
@@ -508,6 +547,27 @@ func (s *Store) onlinePresence(groupID, nowMs int64) map[string]bool {
 	return out
 }
 
+// MemberExistsByToken performs a read-only lookup verifying if a token belongs to
+// an existing member. It does NOT update presence or mutate any database state.
+func (s *Store) MemberExistsByToken(ctx context.Context, token string) (bool, error) {
+	if token == "" {
+		return false, nil
+	}
+	h := HashToken(token)
+	var count int
+	db := s.db
+	if s.ro != nil {
+		db = s.ro
+	}
+	err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM bot_members WHERE token_hash = ? OR agent_token = ?",
+		h, token).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // SetTurnTimeout configures the sweep timeout for silent real bots.
 func (s *Store) SetTurnTimeout(seconds int64) {
 	if seconds > 0 {
@@ -515,8 +575,30 @@ func (s *Store) SetTurnTimeout(seconds int64) {
 	}
 }
 
+type schemaMigration struct {
+	version int
+	name    string
+	apply   func(ctx context.Context, conn *sql.Conn) error
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at INTEGER NOT NULL
+);
+`)
+	if err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	migrations := []schemaMigration{
+		{
+			version: 1,
+			name:    "001_initial_tables",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				_, err := conn.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS groups (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL DEFAULT '',
@@ -573,8 +655,54 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires ON admin_sessions(expires_
 DROP INDEX IF EXISTS idx_members_group;
 DROP INDEX IF EXISTS idx_members_presence;
 `)
-	if err != nil {
-		return err
+				return err
+			},
+		},
+		{
+			version: 2,
+			name:    "002_harden_tokens_and_turn_uniqueness",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				if err := ensureConnColumn(ctx, conn, "bot_members", "token_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+					return err
+				}
+				if err := ensureConnColumn(ctx, conn, "bot_members", "token_enc", "TEXT NOT NULL DEFAULT ''"); err != nil {
+					return err
+				}
+				if _, err := conn.ExecContext(ctx,
+					`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_group_turn ON messages(group_id, turn_seq) WHERE turn_seq IS NOT NULL;`); err != nil {
+					return err
+				}
+				if _, err := conn.ExecContext(ctx,
+					`CREATE INDEX IF NOT EXISTS idx_members_token_hash ON bot_members(token_hash);`); err != nil {
+					return err
+				}
+				return nil
+			},
+		},
+	}
+
+	for _, m := range migrations {
+		var applied int
+		err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM schema_migrations WHERE version = ?", m.version).Scan(&applied)
+		if err != nil {
+			return fmt.Errorf("check migration %d: %w", m.version, err)
+		}
+		if applied > 0 {
+			continue
+		}
+
+		err = s.immediateTx(ctx, func(txCtx context.Context, conn *sql.Conn) error {
+			if err := m.apply(txCtx, conn); err != nil {
+				return fmt.Errorf("apply migration %d (%s): %w", m.version, m.name, err)
+			}
+			_, err = conn.ExecContext(txCtx,
+				"INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
+				m.version, m.name, time.Now().UnixMilli())
+			return err
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	if err := s.ensureColumn(ctx, "groups", "skip_streak", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -592,9 +720,39 @@ DROP INDEX IF EXISTS idx_members_presence;
 	if err := s.ensureColumn(ctx, "admin_sessions", "last_active_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
-	_, _ = s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_members_token_hash ON bot_members(token_hash)")
 
 	return s.migrateUnencryptedTokens(ctx)
+}
+
+func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef string) error {
+	rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == col {
+			found = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !found {
+		if _, err := conn.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+col+" "+colDef); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, col, colDef string) error {
@@ -645,6 +803,13 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		if _, err := os.Stat(bakPath); err == nil {
 			bakPath = fmt.Sprintf("%s.pre_migration_%d.bak", s.dbPath, time.Now().UnixNano())
 		}
+		// Create empty file with 0600 permissions
+		f, err := os.OpenFile(bakPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("create backup file: %w", err)
+		}
+		_ = f.Close()
+
 		escaped := strings.ReplaceAll(filepath.ToSlash(bakPath), "'", "''")
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
 			return fmt.Errorf("pre-migration backup failed: %w", err)
@@ -956,18 +1121,23 @@ func loadMembersLite(ctx context.Context, q querier, groupID int64) ([]Member, e
 	return ms, nil
 }
 
-// markPresenceOnline folds queued presence into already-loaded members in
-// place (token lookup, no map allocation on the write path).
+// markPresenceOnline folds in-memory presence into already-loaded members in
+// place (checking both group-bot map and token map).
 func (s *Store) markPresenceOnline(groupID int64, ms []Member, nowMs int64) {
 	s.presenceMu.Lock()
 	defer s.presenceMu.Unlock()
-	if len(s.presence) == 0 {
-		return
-	}
 	for i := range ms {
-		e, ok := s.presence[ms[i].AgentToken]
-		if ok && e.groupID == groupID && nowMs-e.at <= OnlineWindowMs {
-			ms[i].LastSeenAt = nowMs
+		var seenAt int64
+		if mGroup, ok := s.botSeen[groupID]; ok {
+			seenAt = mGroup[ms[i].BotID]
+		}
+		if seenAt == 0 && ms[i].AgentToken != "" {
+			if e, ok := s.presence[ms[i].AgentToken]; ok {
+				seenAt = e.lastSeenMs
+			}
+		}
+		if seenAt > ms[i].LastSeenAt {
+			ms[i].LastSeenAt = seenAt
 		}
 	}
 }
@@ -1174,4 +1344,61 @@ func insertMember(ctx context.Context, q querier, m *Member, plainToken string, 
 		 VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
 		m.GroupID, m.BotID, m.Name, m.RoleTitle, m.AccentColor, isMock, h, enc, m.LastSeenAt)
 	return err
+}
+
+// MessageCount returns the total number of messages stored in the database for a group.
+func (s *Store) MessageCount(ctx context.Context, groupID int64) (int, error) {
+	var count int
+	err := s.ro.QueryRowContext(ctx, "SELECT count(*) FROM messages WHERE group_id = ?", groupID).Scan(&count)
+	return count, err
+}
+
+// Backup creates an atomic snapshot of the database in backupDir using SQLite's
+// VACUUM INTO. The snapshot file is pre-created with 0600 permissions.
+// If maxKeep > 0, older backups in backupDir matching botlink-backup-*.db are rotated.
+func (s *Store) Backup(ctx context.Context, backupDir string, maxKeep int) (string, error) {
+	if s.dbPath == "" || s.dbPath == ":memory:" || strings.HasPrefix(s.dbPath, "file::memory:") {
+		return "", errors.New("cannot backup in-memory database")
+	}
+	if err := os.MkdirAll(backupDir, 0o700); err != nil {
+		return "", fmt.Errorf("create backup dir: %w", err)
+	}
+
+	fname := fmt.Sprintf("botlink-backup-%d.db", time.Now().UnixNano())
+	bakPath := filepath.Join(backupDir, fname)
+
+	// Pre-create file with 0600 permissions
+	f, err := os.OpenFile(bakPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create backup file: %w", err)
+	}
+	_ = f.Close()
+
+	escaped := strings.ReplaceAll(filepath.ToSlash(bakPath), "'", "''")
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+		_ = os.Remove(bakPath)
+		return "", fmt.Errorf("vacuum into backup failed: %w", err)
+	}
+
+	// Rotate backups if maxKeep > 0
+	if maxKeep > 0 {
+		entries, err := os.ReadDir(backupDir)
+		if err == nil {
+			var baks []string
+			for _, e := range entries {
+				if !e.IsDir() && strings.HasPrefix(e.Name(), "botlink-backup-") && strings.HasSuffix(e.Name(), ".db") {
+					baks = append(baks, filepath.Join(backupDir, e.Name()))
+				}
+			}
+			sort.Strings(baks)
+			if len(baks) > maxKeep {
+				toRemove := len(baks) - maxKeep
+				for i := 0; i < toRemove; i++ {
+					_ = os.Remove(baks[i])
+				}
+			}
+		}
+	}
+
+	return bakPath, nil
 }
