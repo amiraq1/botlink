@@ -4,13 +4,18 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -274,8 +279,10 @@ func TestSSELimitsAndGoroutineCleanup(t *testing.T) {
 		}()
 	}
 
-	// Give them a moment to establish subscriptions
-	time.Sleep(50 * time.Millisecond)
+	// Wait for subscriptions to be registered
+	eventually(t, 2*time.Second, 5*time.Millisecond, func() bool {
+		return srv.broker.totalSubscribers() == streamCount
+	})
 
 	// Now cancel all client streams
 	for _, cancel := range cancels {
@@ -371,15 +378,25 @@ func TestSSEStreamExceedsWriteTimeout(t *testing.T) {
 }
 
 func TestConditionalGETPreservesPresence(t *testing.T) {
-	srv, st := newTestServer(t, "secret123")
+	st := openTestStore(t)
+	secret, err := GenerateEphemeralSecret()
+	if err != nil {
+		t.Fatalf("GenerateEphemeralSecret: %v", err)
+	}
+
+	var simTime int64 = 1_000_000
+	srv := New(Config{
+		Addr:            ":0",
+		DBPath:          filepath.Join(t.TempDir(), "x.db"),
+		FrontendDistDir: t.TempDir(),
+		AdminPassword:   "secret123",
+		SessionSecret:   secret,
+		Clock:           func() int64 { return simTime },
+	}, st)
 	defer func() {
 		srv.Close()
 		st.Close()
-		SetTestClock(nil)
 	}()
-
-	var simTime int64 = 1_000_000
-	SetTestClock(func() int64 { return simTime })
 
 	id, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
 		Name: "Presence Test", TurnMode: "auto_round_robin", MaxTurns: 20,
@@ -486,28 +503,43 @@ func TestSharedIPValidTokenNeverBlockedByBadTokenLimiter(t *testing.T) {
 	}
 }
 
-func TestAdminRoutesProtectedViaASTAndDynamicAuth(t *testing.T) {
-	// Parse server.go AST to verify every registered admin route passes requireAdmin
-	fset := token.NewFileSet()
-	node, err := parser.ParseFile(fset, "server.go", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("failed to parse server.go: %v", err)
-	}
+type routeDef struct {
+	pattern string
+	method  string
+	path    string
+}
 
-	type routeDef struct {
-		pattern string
-		method  string
-		path    string
-	}
+func inspectAdminRoutesAST(node ast.Node) ([]routeDef, error) {
 	var adminRoutes []routeDef
-
+	var inspectErr error
 	ast.Inspect(node, func(n ast.Node) bool {
+		if inspectErr != nil {
+			return false
+		}
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "HandleFunc" {
+		if !ok {
+			return true
+		}
+
+		// Rejects Handle registration of admin routes
+		if sel.Sel.Name == "Handle" {
+			if len(call.Args) > 0 {
+				if lit, ok := call.Args[0].(*ast.BasicLit); ok {
+					pattern := strings.Trim(lit.Value, `"`)
+					if strings.Contains(pattern, "/api/admin/") {
+						inspectErr = fmt.Errorf("admin route %q registered via Handle instead of HandleFunc", pattern)
+						return false
+					}
+				}
+			}
+			return true
+		}
+
+		if sel.Sel.Name != "HandleFunc" {
 			return true
 		}
 		if len(call.Args) < 2 {
@@ -516,7 +548,8 @@ func TestAdminRoutesProtectedViaASTAndDynamicAuth(t *testing.T) {
 
 		lit, ok := call.Args[0].(*ast.BasicLit)
 		if !ok {
-			return true
+			inspectErr = fmt.Errorf("HandleFunc called with non-literal pattern: %T", call.Args[0])
+			return false
 		}
 		pattern := strings.Trim(lit.Value, `"`)
 		if !strings.Contains(pattern, "/api/admin/") {
@@ -526,11 +559,13 @@ func TestAdminRoutesProtectedViaASTAndDynamicAuth(t *testing.T) {
 		// Verify AST wrapper: handler must be a CallExpr to s.requireAdmin(...)
 		handlerCall, ok := call.Args[1].(*ast.CallExpr)
 		if !ok {
-			t.Fatalf("admin route %q handler is not wrapped in requireAdmin: %T", pattern, call.Args[1])
+			inspectErr = fmt.Errorf("admin route %q handler is not wrapped in requireAdmin: %T", pattern, call.Args[1])
+			return false
 		}
 		handlerSel, ok := handlerCall.Fun.(*ast.SelectorExpr)
 		if !ok || handlerSel.Sel.Name != "requireAdmin" {
-			t.Fatalf("admin route %q handler must be wrapped in requireAdmin, got %v", pattern, handlerCall.Fun)
+			inspectErr = fmt.Errorf("admin route %q handler must be wrapped in requireAdmin, got %v", pattern, handlerCall.Fun)
+			return false
 		}
 
 		parts := strings.Fields(pattern)
@@ -544,8 +579,35 @@ func TestAdminRoutesProtectedViaASTAndDynamicAuth(t *testing.T) {
 		return true
 	})
 
+	if inspectErr != nil {
+		return nil, inspectErr
+	}
+	return adminRoutes, nil
+}
+
+func TestAdminRoutesProtectedViaASTAndDynamicAuth(t *testing.T) {
+	// Parse all package files to verify every registered admin route passes requireAdmin
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("failed to parse package directory: %v", err)
+	}
+
+	var adminRoutes []routeDef
+	for _, pkg := range pkgs {
+		for fname, fileNode := range pkg.Files {
+			routes, err := inspectAdminRoutesAST(fileNode)
+			if err != nil {
+				t.Fatalf("%s: %v", filepath.Base(fname), err)
+			}
+			adminRoutes = append(adminRoutes, routes...)
+		}
+	}
+
 	if len(adminRoutes) == 0 {
-		t.Fatal("AST found 0 admin routes in server.go")
+		t.Fatal("AST found 0 admin routes across package files")
 	}
 
 	// Dynamic test: all discovered admin routes must reject unauthenticated requests with 401 & no-store
@@ -567,6 +629,69 @@ func TestAdminRoutesProtectedViaASTAndDynamicAuth(t *testing.T) {
 		if !strings.Contains(cc, "no-store") {
 			t.Errorf("%s %s Cache-Control = %q; want no-store", r.method, testPath, cc)
 		}
+	}
+}
+
+func TestAdminRoutesASTRejectsHandle(t *testing.T) {
+	snippet := `package server
+func register(s *Server) {
+	s.mux.Handle("GET /api/admin/test", handler)
+}
+`
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "dummy.go", snippet, 0)
+	if err != nil {
+		t.Fatalf("parse dummy.go: %v", err)
+	}
+
+	_, err = inspectAdminRoutesAST(node)
+	if err == nil {
+		t.Fatal("expected AST inspection to fail on Handle registration, but it passed")
+	}
+	if !strings.Contains(err.Error(), "registered via Handle instead of HandleFunc") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestAdminRoutesASTRejectsNonLiteralPattern(t *testing.T) {
+	snippet := `package server
+func register(s *Server) {
+	s.mux.HandleFunc(somePattern, handler)
+}
+`
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "dummy.go", snippet, 0)
+	if err != nil {
+		t.Fatalf("parse dummy.go: %v", err)
+	}
+
+	_, err = inspectAdminRoutesAST(node)
+	if err == nil {
+		t.Fatal("expected AST inspection to fail on non-literal pattern, but it passed")
+	}
+	if !strings.Contains(err.Error(), "HandleFunc called with non-literal pattern") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestAdminRoutesASTCatchesUnprotectedEndpoint(t *testing.T) {
+	snippet := `package server
+func register(s *Server) {
+	s.mux.HandleFunc("GET /api/admin/unprotected", s.handleHealthz)
+}
+`
+	fset := token.NewFileSet()
+	node, err := parser.ParseFile(fset, "dummy.go", snippet, 0)
+	if err != nil {
+		t.Fatalf("parse dummy.go: %v", err)
+	}
+
+	_, err = inspectAdminRoutesAST(node)
+	if err == nil {
+		t.Fatal("expected AST inspection to fail on unprotected admin route, but it passed")
+	}
+	if !strings.Contains(err.Error(), "handler is not wrapped in requireAdmin") {
+		t.Fatalf("unexpected error message: %v", err)
 	}
 }
 
@@ -729,4 +854,359 @@ func TestTokenExpiryOnCompletedOrStopped(t *testing.T) {
 	if rotStoppedRec.Code != http.StatusBadRequest {
 		t.Fatalf("rotate on stopped group status = %d; want 400", rotStoppedRec.Code)
 	}
+}
+
+func TestClientIPHeaderBehavior(t *testing.T) {
+	// Case 1: CLIENT_IP_HEADER unset -> spoofed header is ignored, falls back to direct RemoteAddr
+	srvUnset, st := newTestServer(t, "secret123")
+	defer func() {
+		srvUnset.Close()
+		st.Close()
+	}()
+
+	req1 := httptest.NewRequest("GET", "/api/room/test", nil)
+	req1.RemoteAddr = "192.0.2.1:12345"
+	req1.Header.Set("X-Real-IP", "203.0.113.50")
+	if ip := srvUnset.clientIP(req1); ip != "192.0.2.1" {
+		t.Fatalf("unset clientIPHeader: got %q, want RemoteAddr 192.0.2.1", ip)
+	}
+
+	// Case 2: CLIENT_IP_HEADER is set to X-Real-IP -> header value is taken
+	srvSet := New(Config{
+		ClientIPHeader: "X-Real-IP",
+		AdminPassword:  "secret123",
+		SessionSecret:  make([]byte, 32),
+	}, st)
+	defer srvSet.Close()
+
+	req2 := httptest.NewRequest("GET", "/api/room/test", nil)
+	req2.RemoteAddr = "192.0.2.1:12345"
+	req2.Header.Set("X-Real-IP", "203.0.113.50")
+	if ip := srvSet.clientIP(req2); ip != "203.0.113.50" {
+		t.Fatalf("configured clientIPHeader: got %q, want 203.0.113.50", ip)
+	}
+
+	// Case 3: CLIENT_IP_HEADER is set to X-Real-IP, but header is absent -> fallback to direct RemoteAddr
+	req3 := httptest.NewRequest("GET", "/api/room/test", nil)
+	req3.RemoteAddr = "192.0.2.1:12345"
+	if ip := srvSet.clientIP(req3); ip != "192.0.2.1" {
+		t.Fatalf("configured clientIPHeader with missing header: got %q, want fallback RemoteAddr 192.0.2.1", ip)
+	}
+}
+
+func TestLoginParallelRateLimiting50Workers(t *testing.T) {
+	srv, st := newTestServer(t, "correct-password-16-chars")
+	defer func() {
+		srv.Close()
+		st.Close()
+	}()
+
+	const workers = 50
+	var wg sync.WaitGroup
+	results := make([]int, workers)
+	retryAfter := make([]string, workers)
+
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"wrong-password"}`))
+			req.RemoteAddr = fmt.Sprintf("192.0.2.%d:12345", idx+1)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			results[idx] = rec.Code
+			retryAfter[idx] = rec.Header().Get("Retry-After")
+		}(i)
+	}
+	wg.Wait()
+
+	count401 := 0
+	count429 := 0
+	for i, code := range results {
+		switch code {
+		case http.StatusUnauthorized:
+			count401++
+		case http.StatusTooManyRequests:
+			count429++
+			if retryAfter[i] == "" {
+				t.Errorf("worker %d returned 429 without Retry-After header", i)
+			}
+		default:
+			t.Errorf("worker %d returned unexpected status: %d", i, code)
+		}
+	}
+
+	// At most 3-4 requests can be evaluated due to 3 concurrent waiters cap and 1s penalty per wrong password
+	if count401 > 4 {
+		t.Fatalf("expected at most 4 evaluated 401s, got %d", count401)
+	}
+	if count429 < 46 {
+		t.Fatalf("expected at least 46 throttled 429s, got %d", count429)
+	}
+}
+
+func TestLoginCorrectPasswordSucceedsPromptlyWithWaiters(t *testing.T) {
+	srv, st := newTestServer(t, "correct-password-16-chars")
+	defer func() {
+		srv.Close()
+		st.Close()
+	}()
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	// Start 2 background wrong-password attempts (each sleeps 1s under lock)
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"wrong-password"}`))
+			req.RemoteAddr = fmt.Sprintf("192.0.2.%d:12345", 200+idx)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("background attempt %d status = %d; want 401", idx, rec.Code)
+			}
+		}(i)
+	}
+
+	// Give background goroutines a few ms to enter handler and queue
+	time.Sleep(20 * time.Millisecond)
+
+	// Now send correct password: it queues behind the 2 waiters (loginWaiters < 3)
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"correct-password-16-chars"}`))
+	req.RemoteAddr = "192.0.2.199:12345"
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("correct login status = %d; want 200", rec.Code)
+	}
+	if elapsed >= 10*time.Second {
+		t.Fatalf("correct login took %v, must be < 10s", elapsed)
+	}
+	if !strings.Contains(rec.Header().Get("Set-Cookie"), "botlink_admin=") {
+		t.Fatalf("missing session cookie in response")
+	}
+}
+
+func TestLoginWithServerWriteTimeout15s(t *testing.T) {
+	srv, st := newTestServer(t, "correct-password-16-chars")
+	defer func() {
+		srv.Close()
+		st.Close()
+	}()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer ln.Close()
+
+	httpSrv := &http.Server{
+		Handler:      srv.Handler(),
+		WriteTimeout: 15 * time.Second,
+	}
+	go func() {
+		_ = httpSrv.Serve(ln)
+	}()
+	defer func() {
+		_ = httpSrv.Close()
+	}()
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	url := "http://" + ln.Addr().String() + "/api/auth/login"
+
+	// 1. Wrong password (evaluates under lock with 1s sleep, WriteDeadline extended)
+	resp1, err := client.Post(url, "application/json", strings.NewReader(`{"password":"wrong-password"}`))
+	if err != nil {
+		t.Fatalf("POST wrong password: %v", err)
+	}
+	_ = resp1.Body.Close()
+	if resp1.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d; want 401", resp1.StatusCode)
+	}
+
+	// 2. Correct password (evaluates immediately, returns 200)
+	resp2, err := client.Post(url, "application/json", strings.NewReader(`{"password":"correct-password-16-chars"}`))
+	if err != nil {
+		t.Fatalf("POST correct password: %v", err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d; want 200", resp2.StatusCode)
+	}
+}
+
+func TestRoomReplyRateLimitingDoesNotSaveMessage(t *testing.T) {
+	srv, st := newTestServer(t, "secret123")
+	defer func() {
+		srv.Close()
+		st.Close()
+	}()
+
+	now := time.Now().UnixMilli()
+	id, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
+		Name: "Rate Limit Msg Test", TurnMode: "auto_round_robin", MaxTurns: 20,
+		Members: []store.MemberInput{
+			{Name: "Bot1", IsMock: false},
+			{Name: "Bot2", IsMock: false},
+		},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := login(t, srv)
+	rec := doReq(t, srv, "GET", "/api/admin/groups/"+itoa(id), nil, cookie)
+	var detail store.GroupDetail
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	bot1Token := detail.Members[0].AgentToken
+
+	// Send 10 replies (10 is the POST limit per minute)
+	for i := 1; i <= 10; i++ {
+		req := httptest.NewRequest("POST", "/api/room/"+bot1Token+"/reply", strings.NewReader(`{"expectedTurnSeq":1,"content":"msg"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("reply %d status = %d; want 200", i, rec.Code)
+		}
+	}
+
+	// 11th reply must return 429 Too Many Requests
+	req11 := httptest.NewRequest("POST", "/api/room/"+bot1Token+"/reply", strings.NewReader(`{"expectedTurnSeq":1,"content":"should-not-be-saved"}`))
+	req11.Header.Set("Content-Type", "application/json")
+	rec11 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec11, req11)
+
+	if rec11.Code != http.StatusTooManyRequests {
+		t.Fatalf("11th reply status = %d; want 429 Too Many Requests", rec11.Code)
+	}
+
+	// Verify rejected message was NEVER saved to database
+	count, err := st.MessageCount(context.Background(), id)
+	if err != nil {
+		t.Fatalf("MessageCount: %v", err)
+	}
+	if count > 10 {
+		t.Fatalf("expected message count <= 10, got %d", count)
+	}
+	d, err := st.GetGroupDetail(context.Background(), id, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range d.Messages {
+		if m.Content == "should-not-be-saved" {
+			t.Fatal("rejected message was saved in database!")
+		}
+	}
+}
+
+func TestBotPollingIntervalsRemainOnline(t *testing.T) {
+	st := openTestStore(t)
+	secret, err := GenerateEphemeralSecret()
+	if err != nil {
+		t.Fatalf("GenerateEphemeralSecret: %v", err)
+	}
+	var simTime int64 = 1_000_000
+	srv := New(Config{
+		Addr:            ":0",
+		DBPath:          filepath.Join(t.TempDir(), "x.db"),
+		FrontendDistDir: t.TempDir(),
+		AdminPassword:   "secret123",
+		SessionSecret:   secret,
+		Clock:           func() int64 { return simTime },
+	}, st)
+	defer func() {
+		srv.Close()
+		st.Close()
+		goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	}()
+
+	id, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
+		Name: "Polling Interval Test", TurnMode: "auto_round_robin", MaxTurns: 20,
+		Members: []store.MemberInput{
+			{Name: "Bot1", IsMock: false},
+			{Name: "Bot2", IsMock: false},
+		},
+	}, simTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := login(t, srv)
+	rec := doReq(t, srv, "GET", "/api/admin/groups/"+itoa(id), nil, cookie)
+	var detail store.GroupDetail
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	token := detail.Members[0].AgentToken
+
+	// Poll 1 at t=0s (1_000_000)
+	req1 := httptest.NewRequest("GET", "/api/room/"+token, nil)
+	rec1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("poll 1 status = %d", rec1.Code)
+	}
+
+	d1, err := st.GetGroupDetail(context.Background(), id, simTime)
+	if err != nil || !d1.Members[0].Online {
+		t.Fatalf("expected bot online at t=0s, err=%v", err)
+	}
+
+	// Poll 2 at t=25s (1_025_000)
+	simTime += 25_000
+	req2 := httptest.NewRequest("GET", "/api/room/"+token, nil)
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("poll 2 status = %d", rec2.Code)
+	}
+
+	d2, err := st.GetGroupDetail(context.Background(), id, simTime)
+	if err != nil || !d2.Members[0].Online {
+		t.Fatalf("expected bot online at t=25s, err=%v", err)
+	}
+
+	// Poll 3 at t=65s (40s after poll 2: 1_065_000)
+	// Total elapsed is 65s (>45s presence threshold from start, but only 40s <= 45s from last poll)
+	simTime += 40_000
+	req3 := httptest.NewRequest("GET", "/api/room/"+token, nil)
+	rec3 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("poll 3 status = %d", rec3.Code)
+	}
+
+	d3, err := st.GetGroupDetail(context.Background(), id, simTime)
+	if err != nil || !d3.Members[0].Online {
+		t.Fatalf("expected bot online at t=65s (40s since last poll), err=%v", err)
+	}
+
+	// At t=111s (46s after poll 3, no further polls) -> must be offline!
+	simTime += 46_000
+	d4, err := st.GetGroupDetail(context.Background(), id, simTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d4.Members[0].Online {
+		t.Fatalf("expected bot offline at t=111s (46s with no poll)")
+	}
+}
+
+func eventually(t *testing.T, timeout, interval time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(interval)
+	}
+	t.Fatal("condition not met within timeout")
 }

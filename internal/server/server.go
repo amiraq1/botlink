@@ -42,7 +42,12 @@ type Config struct {
 	// TrustHeaderAlways skips the peer check; only enable when every
 	// request is guaranteed to pass through the trusted edge.
 	TrustHeaderAlways bool
-	TurnTimeoutSec    int64
+	// ClientIPHeader, when non-empty, tells clientIP to extract the client
+	// identity strictly from this request header (e.g. X-Real-IP on Railway).
+	ClientIPHeader string
+	TurnTimeoutSec int64
+	// Clock, when provided, overrides the millisecond time source for testing.
+	Clock func() int64
 }
 
 type Server struct {
@@ -52,12 +57,16 @@ type Server struct {
 	log           *log.Logger
 	adminPassword string
 	sessionSecret []byte
+	clock         func() int64
 
+	clientIPHeader     string
 	trustedProxyHeader string
 	trustedProxies     []*net.IPNet
 	trustHeaderAlways  bool
 
 	loginMu      sync.Mutex
+	loginWaiters int
+	loginEvalMu  sync.Mutex
 	loginAttempt map[string][]time.Time
 
 	roomGETLimiter  *windowLimiter
@@ -81,6 +90,10 @@ const (
 )
 
 func New(cfg Config, st *store.Store) *Server {
+	clock := cfg.Clock
+	if clock == nil {
+		clock = func() int64 { return time.Now().UnixMilli() }
+	}
 	s := &Server{
 		cfg:                cfg,
 		store:              st,
@@ -88,6 +101,8 @@ func New(cfg Config, st *store.Store) *Server {
 		log:                log.New(os.Stdout, "botlink: ", log.LstdFlags),
 		adminPassword:      cfg.AdminPassword,
 		sessionSecret:      cfg.SessionSecret,
+		clock:              clock,
+		clientIPHeader:     cfg.ClientIPHeader,
 		trustedProxyHeader: cfg.TrustedProxyHeader,
 		trustedProxies:     cfg.TrustedProxies,
 		trustHeaderAlways:  cfg.TrustHeaderAlways,
@@ -99,7 +114,7 @@ func New(cfg Config, st *store.Store) *Server {
 	}
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
 	s.broker = newEventBroker(maxEventSubscribers, maxEventSubscribersPerGroup)
-	s.sched = newTurnScheduler(st, s.turnTimeoutMs, s.log)
+	s.sched = newTurnScheduler(st, s.turnTimeoutMs, s.log, s.clock)
 	st.SetChangeHook(s.onGroupChange)
 	if len(s.trustedProxies) == 0 {
 		s.trustedProxies = parseCIDRs(DefaultTrustedProxies)
@@ -187,26 +202,8 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-var (
-	clockMu   sync.RWMutex
-	testClock func() int64
-)
-
-func nowMs() int64 {
-	clockMu.RLock()
-	fn := testClock
-	clockMu.RUnlock()
-	if fn != nil {
-		return fn()
-	}
-	return time.Now().UnixMilli()
-}
-
-// SetTestClock allows unit tests to inject a simulated clock.
-func SetTestClock(fn func() int64) {
-	clockMu.Lock()
-	testClock = fn
-	clockMu.Unlock()
+func (s *Server) nowMs() int64 {
+	return s.clock()
 }
 
 func (s *Server) groupID(r *http.Request) (int64, bool) {
@@ -315,28 +312,30 @@ func tokenBucketKey(ip, token string) string {
 	return ip + "|" + hex.EncodeToString(sum[:8])
 }
 
-// roomRateOK applies the per-(IP, token) limits and a global per-IP cap, and
-// writes a 429 with Retry-After when any of them is exhausted.
-func (s *Server) roomRateOK(w http.ResponseWriter, r *http.Request, token string, post bool) bool {
+// checkIPLimit applies the global per-IP room cap before any database lookup.
+func (s *Server) checkIPLimit(w http.ResponseWriter, ip string, now time.Time) bool {
+	if ok, retry := s.roomIPLimiter.allow(ip, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeError(w, http.StatusTooManyRequests, "too many requests from IP, try again later")
+		return false
+	}
+	return true
+}
+
+// roomTokenRateOK applies the per-(IP, token) limit and writes a 429 with
+// Retry-After when exhausted.
+func (s *Server) roomTokenRateOK(w http.ResponseWriter, r *http.Request, token string, post bool) bool {
 	ip := s.clientIP(r)
 	now := time.Now()
 	key := tokenBucketKey(ip, token)
-	checks := []*windowLimiter{s.roomIPLimiter}
+	limiter := s.roomGETLimiter
 	if post {
-		checks = append(checks, s.roomPOSTLimiter)
-	} else {
-		checks = append(checks, s.roomGETLimiter)
+		limiter = s.roomPOSTLimiter
 	}
-	for _, limiter := range checks {
-		limitKey := key
-		if limiter == s.roomIPLimiter {
-			limitKey = ip
-		}
-		if ok, retry := limiter.allow(limitKey, now); !ok {
-			w.Header().Set("Retry-After", strconv.Itoa(retry))
-			writeError(w, http.StatusTooManyRequests, "too many requests, try again later")
-			return false
-		}
+	if ok, retry := limiter.allow(key, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeError(w, http.StatusTooManyRequests, "too many requests, try again later")
+		return false
 	}
 	return true
 }
@@ -369,26 +368,62 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "admin login is not configured: set ADMIN_PASSWORD")
 		return
 	}
-	if !s.loginAllowed(s.clientIP(r), time.Now()) {
+
+	// Extend WriteDeadline using ResponseController so queued waiters are not cut off by WriteTimeout
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
+
+	// 1. Reserve attempt slot before evaluation.
+	// Maximum 3 concurrent waiters (evaluating or waiting in queue); any beyond gets 429.
+	s.loginMu.Lock()
+	if s.loginWaiters >= 3 {
+		s.loginMu.Unlock()
+		w.Header().Set("Retry-After", "2")
+		writeError(w, http.StatusTooManyRequests, "too many login attempts in progress")
+		return
+	}
+	s.loginWaiters++
+	s.loginMu.Unlock()
+
+	defer func() {
+		s.loginMu.Lock()
+		s.loginWaiters--
+		s.loginMu.Unlock()
+	}()
+
+	now := time.Now()
+
+	// 2. Per-IP limiter
+	if !s.loginAllowed(s.clientIP(r), now) {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
+
 	var body struct {
 		Password string `json:"password"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+
+	// 3. Serialized password check.
+	// We hold loginEvalMu while evaluating.
+	// If the password is wrong, sleep 1 second while holding the lock to throttle brute-force attacks.
+	// If the password is correct, release immediately without sleeping so valid logins succeed at once.
+	s.loginEvalMu.Lock()
 	if !constantTimeEqual(body.Password, s.adminPassword) {
+		time.Sleep(1 * time.Second)
+		s.loginEvalMu.Unlock()
 		writeError(w, http.StatusUnauthorized, "invalid password")
 		return
 	}
+	s.loginEvalMu.Unlock()
+
 	sessionID, err := store.NewSessionID()
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
-	now := time.Now()
 	if err := s.store.CreateAdminSession(r.Context(), sessionID,
 		now.UnixMilli(), now.Add(sessionTTL).UnixMilli()); err != nil {
 		s.handleStoreErr(w, err)
@@ -408,7 +443,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if c, err := r.Cookie(sessionCookieName); err == nil {
 		if id, ok := verifySessionToken(s.sessionSecret, c.Value, time.Now()); ok {
-			_ = s.store.RevokeAdminSession(r.Context(), id, nowMs())
+			_ = s.store.RevokeAdminSession(r.Context(), id, s.nowMs())
 		}
 	}
 	s.clearSessionCookie(w, r)
@@ -431,12 +466,18 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
 	now := time.Now()
 
-	state, err := s.store.GetRoomState(r.Context(), token, nowMs())
+	// 1. Check global per-IP limit before reading database
+	if !s.checkIPLimit(w, ip, now) {
+		return
+	}
+
+	// 2. Read-only token check (does not update presence or touch DB write locks)
+	exists, err := s.store.MemberExistsByToken(r.Context(), token)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
-	if state == nil {
+	if !exists {
 		if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
 			w.Header().Set("Retry-After", strconv.Itoa(retry))
 			writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
@@ -450,7 +491,16 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("null"))
 		return
 	}
-	if !s.roomRateOK(w, r, token, false) {
+
+	// 3. Token rate limit check BEFORE updating presence
+	if !s.roomTokenRateOK(w, r, token, false) {
+		return
+	}
+
+	// 4. Retrieve state and update presence
+	state, err := s.store.GetRoomState(r.Context(), token, s.nowMs())
+	if err != nil {
+		s.handleStoreErr(w, err)
 		return
 	}
 	writeJSONConditional(w, r, roomETagSeed(state), state)
@@ -478,6 +528,11 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
 	now := time.Now()
 
+	// 1. Check global per-IP limit before parsing body or reading database
+	if !s.checkIPLimit(w, ip, now) {
+		return
+	}
+
 	var body struct {
 		ExpectedTurnSeq int64  `json:"expectedTurnSeq"`
 		Content         string `json:"content"`
@@ -485,20 +540,33 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	accepted, err := s.store.SubmitBotReply(r.Context(), token, body.ExpectedTurnSeq, body.Content, nowMs())
+
+	// 2. Read-only token check (does not update presence or submit reply)
+	exists, err := s.store.MemberExistsByToken(r.Context(), token)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
-				w.Header().Set("Retry-After", strconv.Itoa(retry))
-				writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
-				return
-			}
-			s.badTokenLimiter.hit(ip, now)
-		}
 		s.handleStoreErr(w, err)
 		return
 	}
-	if !s.roomRateOK(w, r, token, true) {
+	if !exists {
+		if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
+			return
+		}
+		s.badTokenLimiter.hit(ip, now)
+		writeError(w, http.StatusNotFound, "member not found")
+		return
+	}
+
+	// 3. Token rate limit check BEFORE submitting reply or updating presence
+	if !s.roomTokenRateOK(w, r, token, true) {
+		return
+	}
+
+	// 4. Submit reply and update presence
+	accepted, err := s.store.SubmitBotReply(r.Context(), token, body.ExpectedTurnSeq, body.Content, s.nowMs())
+	if err != nil {
+		s.handleStoreErr(w, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-cache")
@@ -511,7 +579,7 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
-	groups, err := s.store.ListGroups(r.Context(), nowMs())
+	groups, err := s.store.ListGroups(r.Context(), s.nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -524,7 +592,7 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	id, err := s.store.CreateGroup(r.Context(), in, nowMs())
+	id, err := s.store.CreateGroup(r.Context(), in, s.nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -553,7 +621,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 	if limit > 200 {
 		limit = 100
 	}
-	detail, err := s.store.GetGroupDetailPaged(r.Context(), id, nowMs(), beforeID, afterID, limit)
+	detail, err := s.store.GetGroupDetailPaged(r.Context(), id, s.nowMs(), beforeID, afterID, limit)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -603,7 +671,7 @@ func (s *Server) handleLeaderMessage(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.store.SendLeaderMessage(r.Context(), id, body.Text, nowMs()); err != nil {
+	if err := s.store.SendLeaderMessage(r.Context(), id, body.Text, s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -616,7 +684,7 @@ func (s *Server) simpleGroupAction(w http.ResponseWriter, r *http.Request, fn fu
 		writeError(w, http.StatusBadRequest, "invalid group id")
 		return
 	}
-	if err := fn(r.Context(), id, nowMs()); err != nil {
+	if err := fn(r.Context(), id, s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -651,7 +719,7 @@ func (s *Server) handleSetTurnMode(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.store.SetTurnMode(r.Context(), id, body.Mode, nowMs()); err != nil {
+	if err := s.store.SetTurnMode(r.Context(), id, body.Mode, s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -670,7 +738,7 @@ func (s *Server) handleSetMaxTurns(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if err := s.store.SetMaxTurns(r.Context(), id, body.MaxTurns, nowMs()); err != nil {
+	if err := s.store.SetMaxTurns(r.Context(), id, body.MaxTurns, s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -687,7 +755,7 @@ func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &in) {
 		return
 	}
-	if err := s.store.AddMember(r.Context(), id, in, nowMs()); err != nil {
+	if err := s.store.AddMember(r.Context(), id, in, s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -700,7 +768,7 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid group id")
 		return
 	}
-	if err := s.store.RemoveMember(r.Context(), id, r.PathValue("botId"), nowMs()); err != nil {
+	if err := s.store.RemoveMember(r.Context(), id, r.PathValue("botId"), s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -713,7 +781,7 @@ func (s *Server) handleRotateToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid group id")
 		return
 	}
-	token, err := s.store.RotateToken(r.Context(), id, r.PathValue("botId"), nowMs())
+	token, err := s.store.RotateToken(r.Context(), id, r.PathValue("botId"), s.nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
@@ -753,7 +821,7 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.RevokeAllAdminSessions(r.Context(), nowMs()); err != nil {
+	if err := s.store.RevokeAllAdminSessions(r.Context(), s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
@@ -772,7 +840,7 @@ func (s *Server) StartTurnSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.store.SweepTurns(ctx, nowMs(), s.turnTimeoutMs()); err != nil {
+			if err := s.store.SweepTurns(ctx, s.nowMs(), s.turnTimeoutMs()); err != nil {
 				s.log.Printf("turn sweep error: %v", err)
 			}
 		}
