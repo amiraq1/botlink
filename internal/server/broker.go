@@ -88,3 +88,9 @@ func (b *eventBroker) closeAll() {
 	b.subs = map[int64]map[*subscription]struct{}{}
 	b.total = 0
 }
+
+func (b *eventBroker) totalSubscribers() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.total
+}

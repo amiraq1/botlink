@@ -22,6 +22,7 @@ type turnScheduler struct {
 	timeoutMs func() int64
 	log       *log.Logger
 	wakeCh    chan struct{}
+	clock     func() int64
 }
 
 type dueGroup struct {
@@ -29,12 +30,16 @@ type dueGroup struct {
 	at int64
 }
 
-func newTurnScheduler(st *store.Store, timeoutMs func() int64, logger *log.Logger) *turnScheduler {
+func newTurnScheduler(st *store.Store, timeoutMs func() int64, logger *log.Logger, clock func() int64) *turnScheduler {
+	if clock == nil {
+		clock = func() int64 { return time.Now().UnixMilli() }
+	}
 	return &turnScheduler{
 		st:        st,
 		timeoutMs: timeoutMs,
 		log:       logger,
 		wakeCh:    make(chan struct{}, 1),
+		clock:     clock,
 	}
 }
 
@@ -72,7 +77,7 @@ func (t *turnScheduler) run(ctx context.Context) {
 	timer := time.NewTimer(schedulerMaxWait)
 	defer timer.Stop()
 	for {
-		now := nowMs()
+		now := t.clock()
 		groups, planOK := t.plan(ctx, now)
 		earliest := int64(0)
 		if !planOK {

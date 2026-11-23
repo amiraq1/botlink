@@ -26,6 +26,12 @@ func (s *Server) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
 	now := time.Now()
 
+	// 1. IP rate limit checked first before any database query
+	if !s.checkIPLimit(w, ip, now) {
+		return
+	}
+
+	// 2. Read-only token lookup by hash
 	groupID, ok, err := s.store.RoomGroupForToken(r.Context(), token)
 	if err != nil {
 		s.handleStoreErr(w, err)
@@ -41,7 +47,9 @@ func (s *Server) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	if !s.roomRateOK(w, r, token, false) {
+
+	// 3. Check token-specific rate limit
+	if !s.roomTokenRateOK(w, r, token, false) {
 		return
 	}
 	s.streamEvents(w, r, groupID, false)
