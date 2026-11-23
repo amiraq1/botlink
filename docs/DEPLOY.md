@@ -1,6 +1,6 @@
 # BOTLINK Deployment & Operations Guide
 
-This guide covers production deployment, environment variables, SQLite database sizing, migration dry-runs, and zero-downtime redeployment behavior for BOTLINK.
+This guide covers production deployment, environment variables, SQLite database sizing, migration dry-runs, graceful restarts, and backup strategies for BOTLINK.
 
 ---
 
@@ -102,19 +102,66 @@ Leaving `.bak` files on disk exposes historical plaintext tokens, so routine ver
 
 ---
 
-## 4. Redeployment & Rolling Restarts
+## 4. Redeployment & Restart Lifecycle
 
-BOTLINK implements clean graceful shutdown on `SIGTERM` and `SIGINT`:
+### Persistent Volume Reality: Momentary Downtime
+BOTLINK relies on SQLite stored on a persistent volume. Cloud platforms (Railway, Fly.io, single-host Docker) **cannot mount a single persistent disk volume to two containers simultaneously**. Therefore:
+- **Zero-downtime rolling deploys are not possible** with single-writer SQLite volumes.
+- Any redeployment incurs a momentary downtime (~2–5 seconds) while the old container stops, unmounts the volume, and the new container starts and mounts it.
+- **Overlap must strictly be 0**: Never configure deployment overlap > 0. Two containers attempting to access the same SQLite database concurrently risks database locks, split-brain writes, and corruption.
 
+### Platform Configuration (Railway & Docker)
+- **`RAILWAY_DEPLOYMENT_OVERLAP_SECONDS`**: Do NOT set this variable (or set it strictly to `0`). Setting an overlap causes deployment failure or volume locking conflicts.
+- **`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=15`**: Railway defaults draining seconds to `0`, which immediately issues a `SIGKILL` without allowing graceful shutdown! You must set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS=15` in your Railway service settings so the container receives `SIGTERM` and has sufficient time to drain in-flight requests and checkpoint SQLite.
+- **PID 1 Signal Handling**: The container image uses the JSON exec form `ENTRYPOINT ["/app/botlink"]`. This guarantees that `/app/botlink` runs as PID 1, receiving `SIGTERM` and `SIGINT` signals directly from the container runtime without an intermediate shell swallowing them.
+
+### Graceful Shutdown Sequence
+When `SIGTERM` is received, the server executes clean teardown within ~1–2 seconds:
 1. **SSE Teardown**: `srv.Close()` cancels `streamCtx` and terminates all active Server-Sent Events subscribers. Client browsers receive a clean stream termination and will automatically attempt reconnection via `retry: 3000`.
 2. **HTTP Server Drain**: `httpServer.Shutdown(shutdownCtx)` with a 5-second timeout rejects new connections while allowing in-flight API requests to complete.
 3. **Presence Queue Flush**: `st.FlushPresence(ctx)` commits any buffered in-memory presence timestamps to SQLite.
-4. **Clean SQLite Close**: Reader pool and writer connection close cleanly, flushing and checkpointing the WAL file.
+4. **Clean SQLite Close**: Reader pool and writer connection close cleanly, flushing and checkpointing the WAL file (`PRAGMA wal_checkpoint(TRUNCATE)`).
 
-### Deployment Plan
-1. Ensure the persistent volume at `DB_PATH` is attached.
-2. Confirm all required production environment variables (`ADMIN_PASSWORD`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`, `CLIENT_IP_HEADER`) are configured in the deployment platform.
-3. Deploy new container image.
-4. Orchestrator sends `SIGTERM` to the old container (with `stop_grace_period` $\ge 10$ seconds).
-5. Old container exits cleanly with code 0 within ~1–2 seconds.
-6. New container starts, runs automatic migration transactions in `store.Open()`, verifies token encryption, and begins listening on `PORT`.
+---
+
+## 5. Backup & Disaster Recovery
+
+### Why Local Volume Backups Are Not Enough
+The automated periodic backups created in `botlink-backup-*.db` on the local volume (`/data`) protect against logical errors (accidental deletion, faulty updates, or bad migrations).
+However, **local backups do not protect against volume loss, platform deletion, disk failure, or provider outage**. If the persistent volume is lost, all local backups stored on it are lost as well.
+
+### Offsite Encrypted Backup Strategy
+Production deployments must implement offsite encrypted backups using SQLite's lock-free `VACUUM INTO` combined with public-key encryption (`age` or `gpg`) and cloud object storage (AWS S3, Cloudflare R2, or Backblaze B2).
+
+#### Automated Cron / Sidecar Workflow
+Run a scheduled backup job (e.g. daily or hourly) using the following pipeline:
+
+```bash
+#!/bin/sh
+set -euo pipefail
+
+BACKUP_DATE=$(date -u +"%Y%m%d_%H%M%SZ")
+TMP_DB="/tmp/botlink_${BACKUP_DATE}.db"
+ENC_DB="/tmp/botlink_${BACKUP_DATE}.db.age"
+
+# 1. Non-blocking snapshot via SQLite VACUUM INTO (can be executed while server is running)
+sqlite3 /data/botlink.db "VACUUM INTO '${TMP_DB}'"
+
+# 2. Encrypt using age with recipient public key
+age -r age1recipient_public_key_here -o "${ENC_DB}" "${TMP_DB}"
+rm -f "${TMP_DB}"
+
+# 3. Upload to offsite S3 / Cloudflare R2 bucket
+aws s3 cp "${ENC_DB}" "s3://my-botlink-backups-bucket/db/${BACKUP_DATE}.db.age" \
+  --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+rm -f "${ENC_DB}"
+
+echo "Offsite encrypted backup completed: ${BACKUP_DATE}"
+```
+
+#### Disaster Recovery / Restore Procedure
+To restore the database from an offsite encrypted backup:
+1. Retrieve the backup: `aws s3 cp s3://my-botlink-backups-bucket/db/20261123_120000Z.db.age ./`
+2. Decrypt with private key: `age -d -i private_key.txt 20261123_120000Z.db.age > restored.db`
+3. Verify integrity: `sqlite3 restored.db "PRAGMA integrity_check;"`
+4. Stop container, replace `/data/botlink.db` with `restored.db`, and restart container.
