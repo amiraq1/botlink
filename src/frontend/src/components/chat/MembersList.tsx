@@ -1,10 +1,16 @@
 import BotAvatar from "@/components/chat/BotAvatar";
 import CopyButton from "@/components/chat/CopyButton";
-import { useRemoveMember, useRotateMemberToken } from "@/hooks/useAdminQueries";
+import MemberToolsSection from "@/components/chat/MemberToolsSection";
+import {
+  useGroupMemberTools,
+  useRemoveMember,
+  useRotateMemberToken,
+  useTools,
+} from "@/hooks/useAdminQueries";
 import type { MemberView } from "@/lib/api";
 import { buildAgentPrompt, buildAgentUrl, isMemberOnline } from "@/lib/convert";
 import { cn } from "@/lib/utils";
-import { RefreshCw, Trash2 } from "lucide-react";
+import { RefreshCw, Trash2, Wrench } from "lucide-react";
 import { useState } from "react";
 
 const MIN_MEMBERS = 2;
@@ -18,7 +24,13 @@ export default function MembersList({
 }) {
   const remove = useRemoveMember();
   const rotate = useRotateMemberToken();
+  const { data: allTools = [] } = useTools();
+  const { data: memberTools = [] } = useGroupMemberTools(groupId);
+
   const [confirmingBotId, setConfirmingBotId] = useState<string | null>(null);
+  const [expandedToolsBotId, setExpandedToolsBotId] = useState<string | null>(
+    null,
+  );
   const canRemove = members.length > MIN_MEMBERS;
 
   return (
@@ -27,6 +39,22 @@ export default function MembersList({
         {members.map((m, i) => {
           const online = isMemberOnline(m);
           const url = buildAgentUrl(m.agentToken);
+
+          // Get enabled tools for this specific member
+          const botAssignedTools = memberTools.filter(
+            (mt) => mt.botId === m.botId && mt.enabled,
+          );
+          const activeTools = botAssignedTools
+            .map((mt) => {
+              const t = allTools.find((x) => x.id === mt.toolId);
+              return t?.enabled
+                ? { name: t.name, description: t.description }
+                : null;
+            })
+            .filter(
+              (x): x is { name: string; description: string } => x !== null,
+            );
+
           return (
             <li
               key={m.botId}
@@ -87,9 +115,27 @@ export default function MembersList({
                 />
                 <CopyButton
                   label="نسخ التوجيه الجاهز"
-                  text={buildAgentPrompt(url)}
+                  text={buildAgentPrompt(url, activeTools)}
                   ocid={`groupinfo.copy_prompt_button.${i + 1}`}
                 />
+                <button
+                  type="button"
+                  data-ocid={`groupinfo.toggle_tools_button.${i + 1}`}
+                  onClick={() =>
+                    setExpandedToolsBotId(
+                      expandedToolsBotId === m.botId ? null : m.botId,
+                    )
+                  }
+                  className={cn(
+                    "inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring",
+                    expandedToolsBotId === m.botId
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-secondary hover:bg-accent",
+                  )}
+                >
+                  <Wrench aria-hidden="true" className="size-3.5" />
+                  الأدوات ({activeTools.length})
+                </button>
                 {confirmingBotId === m.botId ? (
                   <>
                     <button
@@ -128,6 +174,11 @@ export default function MembersList({
                   </button>
                 )}
               </div>
+              {expandedToolsBotId === m.botId && (
+                <div className="mt-1">
+                  <MemberToolsSection groupId={groupId} botId={m.botId} />
+                </div>
+              )}
               {rotate.isError && confirmingBotId === m.botId ? (
                 <p
                   role="alert"

@@ -820,10 +820,15 @@ func (s *Store) GetRoomState(ctx context.Context, token string, nowMs int64) (*R
 		return nil, err
 	}
 	yourTurn := g.Status == "running" && g.CurrentTurnBotID != nil && *g.CurrentTurnBotID == m.BotID
+	memberTools, err := s.GetToolsForMember(ctx, m.GroupID, m.BotID)
+	if err != nil {
+		return nil, err
+	}
 	return &RoomState{
 		Status: g.Status, BotID: m.BotID, BotName: m.Name, RoleTitle: m.RoleTitle,
 		GroupName: g.Name, OnlineNames: onlineNames, TurnSeq: g.TurnSeq,
 		MaxTurns: g.MaxTurns, Topic: g.Topic, IsYourTurn: yourTurn, Messages: msgs,
+		Tools: memberTools,
 	}, nil
 }
 

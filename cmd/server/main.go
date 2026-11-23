@@ -20,6 +20,8 @@ import (
 
 	"github.com/amiraq1/botlink/internal/server"
 	"github.com/amiraq1/botlink/internal/store"
+	"github.com/amiraq1/botlink/internal/tools"
+	_ "github.com/amiraq1/botlink/internal/tools/builtin"
 )
 
 func envOr(key, def string) string {
@@ -84,12 +86,27 @@ func main() {
 		}
 		turnTimeoutSec = n
 	}
+	if raw := os.Getenv("TOOL_CALL_RETENTION"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 60 {
+			logger.Fatal("TOOL_CALL_RETENTION must be an integer >= 60 (seconds)")
+		}
+		store.SetToolCallRetention(n * 1000)
+	}
 
 	st, err := store.Open(dbPath, tokenKey)
 	if err != nil {
 		logger.Fatalf("open database: %v", err)
 	}
 	defer st.Close()
+
+	initNow := time.Now().UnixMilli()
+	if err := st.CancelAllPendingToolCalls(context.Background(), initNow); err != nil {
+		logger.Printf("warning: cleanup orphan pending tool calls: %v", err)
+	}
+	if err := tools.SyncBuiltinTools(context.Background(), st, initNow); err != nil {
+		logger.Fatalf("sync builtin tools: %v", err)
+	}
 
 	trustedHeader := os.Getenv("TRUSTED_PROXY_HEADER")
 	trustAlways := false

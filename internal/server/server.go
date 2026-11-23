@@ -84,6 +84,12 @@ type Server struct {
 	roomPOSTLimiter *windowLimiter
 	roomIPLimiter   *windowLimiter
 	badTokenLimiter *windowLimiter
+	toolCallLimiter *windowLimiter
+
+	webhookClient *SafeWebhookClient
+	toolCancelsMu sync.Mutex
+	toolCancels   map[int64]map[uint64]context.CancelFunc
+	toolCancelSeq uint64
 
 	broker       *eventBroker
 	sched        *turnScheduler
@@ -130,10 +136,13 @@ func New(cfg Config, st *store.Store) *Server {
 		roomPOSTLimiter:    newWindowLimiter(10, time.Minute, 8192),
 		roomIPLimiter:      newWindowLimiter(180, time.Minute, 8192),
 		badTokenLimiter:    newWindowLimiter(15, time.Minute, 4096),
+		toolCallLimiter:    newWindowLimiter(20, time.Minute, 8192),
+		webhookClient:      NewSafeWebhookClient(AllowPrivateHostsConfig(), AllowHTTPConfig(cfg.Production), 15*time.Second),
+		toolCancels:        make(map[int64]map[uint64]context.CancelFunc),
 	}
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
 	s.broker = newEventBroker(maxEventSubscribers, maxEventSubscribersPerGroup)
-	s.sched = newTurnScheduler(st, s.turnTimeoutMs, s.log, s.clock)
+	s.sched = newTurnScheduler(st, s.turnTimeoutMs, s.log, s.clock, s.cancelGroupTools)
 	st.SetChangeHook(s.onGroupChange)
 	if len(s.trustedProxies) == 0 {
 		s.trustedProxies = parseCIDRs(DefaultTrustedProxies)
@@ -173,6 +182,7 @@ func (s *Server) routes() {
 	// Public agent room: never requires auth, never leaks tokens.
 	s.mux.HandleFunc("GET /api/room/{token}", s.handleRoomState)
 	s.mux.HandleFunc("POST /api/room/{token}/reply", s.handleRoomReply)
+	s.mux.HandleFunc("POST /api/room/{token}/tool-call", s.handleRoomToolCall)
 	s.mux.HandleFunc("GET /api/room/{token}/events", s.handleRoomEvents)
 
 	// Admin API: cookie auth enforced on every route.
@@ -191,6 +201,23 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/admin/groups/{id}/members/{botId}", s.requireAdmin(s.handleRemoveMember))
 	s.mux.HandleFunc("POST /api/admin/groups/{id}/members/{botId}/rotate-token", s.requireAdmin(s.handleRotateToken))
 	s.mux.HandleFunc("POST /api/admin/sessions/revoke-all", s.requireAdmin(s.handleRevokeAllSessions))
+
+	// Tools Management (admin)
+	s.mux.HandleFunc("GET /api/admin/tools", s.requireAdmin(s.handleListTools))
+	s.mux.HandleFunc("POST /api/admin/tools", s.requireAdmin(s.handleCreateTool))
+	s.mux.HandleFunc("GET /api/admin/tools/{toolId}", s.requireAdmin(s.handleGetTool))
+	s.mux.HandleFunc("PUT /api/admin/tools/{toolId}", s.requireAdmin(s.handleUpdateTool))
+	s.mux.HandleFunc("POST /api/admin/tools/{toolId}/enable", s.requireAdmin(s.handleEnableTool))
+	s.mux.HandleFunc("DELETE /api/admin/tools/{toolId}", s.requireAdmin(s.handleDeleteTool))
+	s.mux.HandleFunc("POST /api/admin/tools/{toolId}/test", s.requireAdmin(s.handleTestTool))
+
+	// Group Member Tools (admin)
+	s.mux.HandleFunc("GET /api/admin/groups/{id}/member-tools", s.requireAdmin(s.handleListGroupMemberTools))
+	s.mux.HandleFunc("POST /api/admin/groups/{id}/members/{botId}/tools/{toolId}", s.requireAdmin(s.handleSetMemberTool))
+	s.mux.HandleFunc("DELETE /api/admin/groups/{id}/members/{botId}/tools/{toolId}", s.requireAdmin(s.handleRemoveMemberTool))
+
+	// Tool Calls Audit Log (admin)
+	s.mux.HandleFunc("GET /api/admin/groups/{id}/tool-calls", s.requireAdmin(s.handleListToolCallsAudit))
 
 	// Static frontend + SPA fallback (everything else).
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -578,6 +605,11 @@ func roomETagSeed(state *store.RoomState) string {
 	if n := len(state.Messages); n > 0 {
 		fmt.Fprintf(&b, "%d|%d", state.Messages[0].ID, state.Messages[n-1].ID)
 	}
+	fmt.Fprintf(&b, "|%d|", len(state.Tools))
+	for _, tool := range state.Tools {
+		b.WriteString(tool.Name)
+		b.WriteByte(0)
+	}
 	return b.String()
 }
 
@@ -750,11 +782,66 @@ func (s *Server) simpleGroupAction(w http.ResponseWriter, r *http.Request, fn fu
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) registerToolCancel(groupID int64, cancel context.CancelFunc) uint64 {
+	s.toolCancelsMu.Lock()
+	defer s.toolCancelsMu.Unlock()
+	s.toolCancelSeq++
+	seq := s.toolCancelSeq
+	if s.toolCancels[groupID] == nil {
+		s.toolCancels[groupID] = make(map[uint64]context.CancelFunc)
+	}
+	s.toolCancels[groupID][seq] = cancel
+	return seq
+}
+
+func (s *Server) unregisterToolCancel(groupID int64, seq uint64) {
+	s.toolCancelsMu.Lock()
+	defer s.toolCancelsMu.Unlock()
+	if m, ok := s.toolCancels[groupID]; ok {
+		delete(m, seq)
+		if len(m) == 0 {
+			delete(s.toolCancels, groupID)
+		}
+	}
+}
+
+func (s *Server) cancelGroupTools(groupID int64) {
+	s.toolCancelsMu.Lock()
+	cancels := s.toolCancels[groupID]
+	delete(s.toolCancels, groupID)
+	s.toolCancelsMu.Unlock()
+
+	for _, cancel := range cancels {
+		if cancel != nil {
+			cancel()
+		}
+	}
+	_ = s.store.CancelPendingToolCalls(context.Background(), groupID, s.nowMs())
+}
+
+func (s *Server) toolCallRateOK(w http.ResponseWriter, r *http.Request, token string) bool {
+	ip := s.clientIP(r)
+	now := time.Now()
+	key := tokenBucketKey(ip, token)
+	if ok, retry := s.toolCallLimiter.allow(key, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeError(w, http.StatusTooManyRequests, "too many tool calls, try again later")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleSkip(w http.ResponseWriter, r *http.Request) {
+	if id, ok := s.groupID(r); ok {
+		s.cancelGroupTools(id)
+	}
 	s.simpleGroupAction(w, r, s.store.SkipCurrentTurn)
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	if id, ok := s.groupID(r); ok {
+		s.cancelGroupTools(id)
+	}
 	s.simpleGroupAction(w, r, s.store.PauseGroup)
 }
 
@@ -763,6 +850,9 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if id, ok := s.groupID(r); ok {
+		s.cancelGroupTools(id)
+	}
 	s.simpleGroupAction(w, r, s.store.StopGroup)
 }
 
@@ -899,8 +989,21 @@ func (s *Server) StartTurnSweeper(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			ids, err := s.store.RunningGroupIDs(ctx)
+			if err == nil {
+				now := s.nowMs()
+				for _, id := range ids {
+					due, err := s.store.NextDue(ctx, id, now, s.turnTimeoutMs())
+					if err == nil && due.Kind != "" && due.DueAt <= now {
+						s.cancelGroupTools(id)
+					}
+				}
+			}
 			if err := s.store.SweepTurns(ctx, s.nowMs(), s.turnTimeoutMs()); err != nil {
 				s.log.Printf("turn sweep error: %v", err)
+			}
+			if err := s.store.SweepToolCalls(ctx, s.nowMs()); err != nil {
+				s.log.Printf("tool call sweep error: %v", err)
 			}
 		}
 	}

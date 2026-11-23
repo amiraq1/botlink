@@ -18,11 +18,12 @@ const (
 // time instead of waiting for the 15-second safety sweep. It sleeps until the
 // earliest deadline and is woken early by every group change.
 type turnScheduler struct {
-	st        *store.Store
-	timeoutMs func() int64
-	log       *log.Logger
-	wakeCh    chan struct{}
-	clock     func() int64
+	st          *store.Store
+	timeoutMs   func() int64
+	log         *log.Logger
+	wakeCh      chan struct{}
+	clock       func() int64
+	onDueAction func(groupID int64)
 }
 
 type dueGroup struct {
@@ -30,16 +31,17 @@ type dueGroup struct {
 	at int64
 }
 
-func newTurnScheduler(st *store.Store, timeoutMs func() int64, logger *log.Logger, clock func() int64) *turnScheduler {
+func newTurnScheduler(st *store.Store, timeoutMs func() int64, logger *log.Logger, clock func() int64, onDueAction func(groupID int64)) *turnScheduler {
 	if clock == nil {
 		clock = func() int64 { return time.Now().UnixMilli() }
 	}
 	return &turnScheduler{
-		st:        st,
-		timeoutMs: timeoutMs,
-		log:       logger,
-		wakeCh:    make(chan struct{}, 1),
-		clock:     clock,
+		st:          st,
+		timeoutMs:   timeoutMs,
+		log:         logger,
+		wakeCh:      make(chan struct{}, 1),
+		clock:       clock,
+		onDueAction: onDueAction,
 	}
 }
 
@@ -86,6 +88,9 @@ func (t *turnScheduler) run(ctx context.Context) {
 		processed := false
 		for _, g := range groups {
 			if g.at <= now {
+				if t.onDueAction != nil {
+					t.onDueAction(g.id)
+				}
 				_, err := t.st.ProcessDueGroup(ctx, g.id, now, t.timeoutMs())
 				if err != nil {
 					t.log.Printf("scheduler: group %d: %v", g.id, err)

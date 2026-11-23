@@ -172,17 +172,18 @@ type GroupDetail struct {
 
 // RoomState is the public agent-room view. It NEVER contains agent tokens.
 type RoomState struct {
-	Status      string    `json:"status"`
-	BotID       string    `json:"botId"`
-	BotName     string    `json:"botName"`
-	RoleTitle   string    `json:"roleTitle"`
-	GroupName   string    `json:"groupName"`
-	OnlineNames []string  `json:"onlineNames"`
-	TurnSeq     int64     `json:"turnSeq"`
-	MaxTurns    int64     `json:"maxTurns"`
-	Topic       string    `json:"topic"`
-	IsYourTurn  bool      `json:"isYourTurn"`
-	Messages    []Message `json:"messages"`
+	Status      string       `json:"status"`
+	BotID       string       `json:"botId"`
+	BotName     string       `json:"botName"`
+	RoleTitle   string       `json:"roleTitle"`
+	GroupName   string       `json:"groupName"`
+	OnlineNames []string     `json:"onlineNames"`
+	TurnSeq     int64        `json:"turnSeq"`
+	MaxTurns    int64        `json:"maxTurns"`
+	Topic       string       `json:"topic"`
+	IsYourTurn  bool         `json:"isYourTurn"`
+	Messages    []Message    `json:"messages"`
+	Tools       []PublicTool `json:"tools"`
 }
 
 type MemberInput struct {
@@ -731,6 +732,60 @@ DROP INDEX IF EXISTS idx_members_presence;
 					}
 				}
 				return nil
+			},
+		},
+		{
+			version: 4,
+			name:    "004_tools",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				_, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS tools (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                TEXT    NOT NULL,
+  description         TEXT    NOT NULL DEFAULT '',
+  input_schema        TEXT    NOT NULL DEFAULT '{}',
+  timeout_ms          INTEGER NOT NULL DEFAULT 5000,
+  enabled             INTEGER NOT NULL DEFAULT 1,
+  kind                TEXT    NOT NULL DEFAULT 'builtin',
+  webhook_url         TEXT    NOT NULL DEFAULT '',
+  webhook_headers_enc TEXT    NOT NULL DEFAULT '',
+  webhook_secret_enc  TEXT    NOT NULL DEFAULT '',
+  created_at          INTEGER NOT NULL DEFAULT 0,
+  updated_at          INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tools_name ON tools(name);
+
+CREATE TABLE IF NOT EXISTS member_tools (
+  group_id         INTEGER NOT NULL,
+  bot_id           TEXT    NOT NULL,
+  tool_id          INTEGER NOT NULL REFERENCES tools(id) ON DELETE CASCADE,
+  enabled          INTEGER NOT NULL DEFAULT 1,
+  max_calls_per_turn INTEGER NOT NULL DEFAULT 3,
+  PRIMARY KEY (group_id, bot_id, tool_id),
+  FOREIGN KEY (group_id, bot_id) REFERENCES bot_members(group_id, bot_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_member_tools_tool ON member_tools(tool_id);
+
+CREATE TABLE IF NOT EXISTS tool_calls (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id     INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id       TEXT    NOT NULL,
+  tool_id      INTEGER NOT NULL REFERENCES tools(id) ON DELETE CASCADE,
+  call_id      TEXT    NOT NULL,
+  turn_seq     INTEGER NOT NULL,
+  status       TEXT    NOT NULL DEFAULT 'pending',
+  arguments    TEXT    NOT NULL DEFAULT '{}',
+  result       TEXT    NOT NULL DEFAULT '',
+  error_msg    TEXT    NOT NULL DEFAULT '',
+  duration_ms  INTEGER NOT NULL DEFAULT 0,
+  created_at   INTEGER NOT NULL DEFAULT 0,
+  completed_at INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (group_id, bot_id, call_id)
+);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_group   ON tool_calls(group_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tool_calls_pending ON tool_calls(status) WHERE status = 'pending';
+`)
+				return err
 			},
 		},
 	}

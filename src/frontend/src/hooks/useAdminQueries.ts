@@ -4,20 +4,34 @@ import {
   type GroupId,
   type GroupSummary,
   type MemberInput,
+  type MemberTool,
+  type Tool,
+  type ToolCall,
+  type ToolInput,
   type TurnMode,
   addMember as apiAddMember,
   createGroup as apiCreateGroup,
+  createTool as apiCreateTool,
+  deleteTool as apiDeleteTool,
+  enableTool as apiEnableTool,
   getGroupDetail as apiGetGroupDetail,
+  listGroupMemberTools as apiListGroupMemberTools,
   listGroups as apiListGroups,
+  listToolCallsAudit as apiListToolCallsAudit,
+  listTools as apiListTools,
   pauseGroup as apiPauseGroup,
   removeMember as apiRemoveMember,
+  removeMemberTool as apiRemoveMemberTool,
   resumeGroup as apiResumeGroup,
   revokeAllSessions as apiRevokeAllSessions,
   sendLeaderMessage as apiSendLeaderMessage,
   setMaxTurns as apiSetMaxTurns,
+  setMemberTool as apiSetMemberTool,
   setTurnMode as apiSetTurnMode,
   skipCurrentTurn as apiSkipCurrentTurn,
   stopGroup as apiStopGroup,
+  testTool as apiTestTool,
+  updateTool as apiUpdateTool,
   checkAuth,
   rotateMemberToken,
 } from "@/lib/api";
@@ -29,7 +43,14 @@ import {
   applyMaxTurns,
   applyTurnMode,
 } from "@/lib/optimistic";
-import { authKey, groupKey, groupsKey } from "@/lib/queryKeys";
+import {
+  authKey,
+  groupKey,
+  groupsKey,
+  memberToolsKey,
+  toolCallsAuditKey,
+  toolsKey,
+} from "@/lib/queryKeys";
 import {
   type QueryClient,
   useMutation,
@@ -38,7 +59,14 @@ import {
 } from "@tanstack/react-query";
 
 export type { CreateGroupInput, MemberInput };
-export { authKey, groupKey, groupsKey };
+export {
+  authKey,
+  groupKey,
+  groupsKey,
+  toolsKey,
+  memberToolsKey,
+  toolCallsAuditKey,
+};
 
 /** Snapshot taken before an optimistic patch, restored on failure. */
 interface GroupSnapshot {
@@ -323,5 +351,135 @@ export function useRotateMemberToken() {
 export function useRevokeAllSessions() {
   return useMutation<void, Error, void>({
     mutationFn: () => apiRevokeAllSessions(),
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Tools Management Hooks                                             */
+/* ------------------------------------------------------------------ */
+
+export function useTools() {
+  return useQuery<Tool[]>({
+    queryKey: toolsKey,
+    queryFn: () => apiListTools(),
+    staleTime: 5000,
+  });
+}
+
+export function useCreateTool() {
+  const queryClient = useQueryClient();
+  return useMutation<{ id: number }, Error, ToolInput>({
+    mutationFn: (input) => apiCreateTool(input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: toolsKey });
+    },
+  });
+}
+
+export function useUpdateTool() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { id: number; input: Partial<ToolInput> }>({
+    mutationFn: ({ id, input }) => apiUpdateTool(id, input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: toolsKey });
+    },
+  });
+}
+
+export function useEnableTool() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { id: number; enabled: boolean }>({
+    mutationFn: ({ id, enabled }) => apiEnableTool(id, enabled),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: toolsKey });
+    },
+  });
+}
+
+export function useDeleteTool() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, number>({
+    mutationFn: (id) => apiDeleteTool(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: toolsKey });
+    },
+  });
+}
+
+export function useTestTool() {
+  return useMutation<
+    import("@/lib/api").ToolTestResult,
+    Error,
+    { id: number; input: Record<string, unknown> }
+  >({
+    mutationFn: ({ id, input }) => apiTestTool(id, input),
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Member Tools Assignment Hooks                                      */
+/* ------------------------------------------------------------------ */
+
+export function useGroupMemberTools(groupId: GroupId | null) {
+  return useQuery<MemberTool[]>({
+    queryKey:
+      groupId === null ? ["member-tools", "none"] : memberToolsKey(groupId),
+    queryFn: () => (groupId === null ? [] : apiListGroupMemberTools(groupId)),
+    enabled: groupId !== null,
+    staleTime: 5000,
+  });
+}
+
+export function useSetMemberTool() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    void,
+    Error,
+    {
+      groupId: GroupId;
+      botId: string;
+      toolId: number;
+      enabled: boolean;
+      maxCallsPerTurn?: number;
+    }
+  >({
+    mutationFn: ({ groupId, botId, toolId, enabled, maxCallsPerTurn }) =>
+      apiSetMemberTool(groupId, botId, toolId, enabled, maxCallsPerTurn ?? 3),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({ queryKey: memberToolsKey(groupId) });
+    },
+  });
+}
+
+export function useRemoveMemberTool() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    void,
+    Error,
+    { groupId: GroupId; botId: string; toolId: number }
+  >({
+    mutationFn: ({ groupId, botId, toolId }) =>
+      apiRemoveMemberTool(groupId, botId, toolId),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({ queryKey: memberToolsKey(groupId) });
+    },
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Tool Calls Audit Log Hooks                                         */
+/* ------------------------------------------------------------------ */
+
+export function useToolCallsAudit(groupId: GroupId | null, limit = 50) {
+  return useQuery<ToolCall[]>({
+    queryKey:
+      groupId === null
+        ? ["tool-calls", "none"]
+        : toolCallsAuditKey(groupId, limit),
+    queryFn: () =>
+      groupId === null ? [] : apiListToolCallsAudit(groupId, limit),
+    enabled: groupId !== null,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: false,
   });
 }

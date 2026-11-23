@@ -125,6 +125,12 @@ export interface RoomState {
   botId: string;
   maxTurns: number;
   groupName: string;
+  tools?: Array<{
+    name: string;
+    description: string;
+    inputSchema: unknown;
+    timeoutMs: number;
+  }>;
 }
 
 export class ApiError extends Error {
@@ -326,4 +332,156 @@ export async function submitBotReply(
     expectedTurnSeq,
     content,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Tools & Member Tools (Admin)
+// ---------------------------------------------------------------------------
+
+export type ToolKind = "builtin" | "http_webhook";
+
+export interface Tool {
+  id: number;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  timeoutMs: number;
+  enabled: boolean;
+  kind: ToolKind;
+  webhookUrl?: string;
+  hasWebhookHeaders: boolean;
+  hasWebhookSecret: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ToolInput {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  timeoutMs: number;
+  enabled: boolean;
+  kind: ToolKind;
+  webhookUrl?: string;
+  webhookHeaders?: Record<string, string>;
+  webhookSecret?: string;
+}
+
+export interface MemberTool {
+  groupId: number;
+  botId: string;
+  toolId: number;
+  toolName: string;
+  enabled: boolean;
+  maxCallsPerTurn: number;
+}
+
+export type ToolCallStatus =
+  | "pending"
+  | "success"
+  | "error"
+  | "cancelled"
+  | "timeout";
+
+export interface ToolCall {
+  id: number;
+  groupId: number;
+  botId: string;
+  toolId: number;
+  toolName: string;
+  callId: string;
+  turnSeq: number;
+  status: ToolCallStatus;
+  arguments: unknown;
+  result: string;
+  errorMsg: string;
+  durationMs: number;
+  createdAt: number;
+  completedAt: number;
+}
+
+export async function listTools(): Promise<Tool[]> {
+  return request<Tool[]>("/api/admin/tools");
+}
+
+export async function getTool(id: number): Promise<Tool> {
+  return request<Tool>(`/api/admin/tools/${id}`);
+}
+
+export async function createTool(input: ToolInput): Promise<{ id: number }> {
+  return post<{ id: number }>("/api/admin/tools", input);
+}
+
+export async function updateTool(
+  id: number,
+  input: Partial<ToolInput>,
+): Promise<void> {
+  await request<void>(`/api/admin/tools/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function enableTool(id: number, enabled: boolean): Promise<void> {
+  await post<{ ok: boolean }>(`/api/admin/tools/${id}/enable`, { enabled });
+}
+
+export async function deleteTool(id: number): Promise<void> {
+  await request<void>(`/api/admin/tools/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export interface ToolTestResult {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  durationMs: number;
+}
+
+export async function testTool(
+  id: number,
+  args: Record<string, unknown>,
+): Promise<ToolTestResult> {
+  return post<ToolTestResult>(`/api/admin/tools/${id}/test`, {
+    arguments: args,
+  });
+}
+
+export async function listGroupMemberTools(
+  groupId: number,
+): Promise<MemberTool[]> {
+  return request<MemberTool[]>(`/api/admin/groups/${groupId}/member-tools`);
+}
+
+export async function setMemberTool(
+  groupId: number,
+  botId: string,
+  toolId: number,
+  enabled: boolean,
+  maxCallsPerTurn: number,
+): Promise<void> {
+  await post<{ ok: boolean }>(
+    `/api/admin/groups/${groupId}/members/${botId}/tools/${toolId}`,
+    { enabled, maxCallsPerTurn },
+  );
+}
+
+export async function removeMemberTool(
+  groupId: number,
+  botId: string,
+  toolId: number,
+): Promise<void> {
+  await request<void>(
+    `/api/admin/groups/${groupId}/members/${botId}/tools/${toolId}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function listToolCallsAudit(
+  groupId: number,
+  limit?: number,
+): Promise<ToolCall[]> {
+  const query = limit ? `?limit=${limit}` : "";
+  return request<ToolCall[]>(`/api/admin/groups/${groupId}/tool-calls${query}`);
 }

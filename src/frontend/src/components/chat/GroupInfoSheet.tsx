@@ -6,6 +6,7 @@ import {
   TurnModeSection,
 } from "@/components/chat/InfoSections";
 import MembersList from "@/components/chat/MembersList";
+import ToolAuditLog from "@/components/chat/ToolAuditLog";
 import type { GroupControls } from "@/components/chat/useGroupControls";
 import {
   Sheet,
@@ -17,7 +18,7 @@ import {
 import type { GroupDetail } from "@/lib/api";
 import { formatNumberAr } from "@/lib/convert";
 
-/** Drawer with turn mode, controls, max turns, add-bot form and the members list. */
+/** Drawer with turn mode, controls, max turns, add-bot form, the members list, and tool audit. */
 export default function GroupInfoSheet({
   detail,
   controls,
@@ -57,6 +58,9 @@ export default function GroupInfoSheet({
           </Section>
           <Section title={`الأعضاء (${formatNumberAr(members.length)})`}>
             <MembersList groupId={group.id} members={members} />
+          </Section>
+          <Section title="سجل استدعاء الأدوات">
+            <ToolAuditLog groupId={group.id} />
           </Section>
         </div>
       </SheetContent>
