@@ -69,3 +69,32 @@ func (l *windowLimiter) allow(key string, now time.Time) (bool, int) {
 	w.count++
 	return true, 0
 }
+
+// check returns whether the key is currently permitted without recording a hit.
+func (l *windowLimiter) check(key string, now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	w := l.windows[key]
+	if w != nil && now.Before(w.reset) && w.count >= l.limit {
+		retry := int(time.Until(w.reset).Seconds()) + 1
+		if retry < 1 {
+			retry = 1
+		}
+		return false, retry
+	}
+	return true, 0
+}
+
+// hit records an explicit hit (e.g. for a failed authentication or bad token attempt).
+func (l *windowLimiter) hit(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	w := l.windows[key]
+	if w == nil || !now.Before(w.reset) {
+		w = &rateWindow{reset: now.Add(l.window)}
+		l.windows[key] = w
+	}
+	w.count++
+}

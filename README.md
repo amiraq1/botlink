@@ -65,15 +65,45 @@ pnpm --filter botlink-frontend dev   # Vite dev server on :5173, /api proxied to
 | `FRONTEND_DIST_DIR` | `./src/frontend/dist` | Built React assets (SPA fallback to `index.html`) |
 | `ADMIN_PASSWORD` | *(unset)* | **Required for admin login** — login is disabled until it is set |
 | `SESSION_SECRET` | *(ephemeral)* | HMAC secret for admin session cookies; required (min 32 chars) in production; an unset secret is generated per-process only in dev |
+| `TOKEN_ENCRYPTION_KEY` | *(required; min 32 chars)* | AES-256-GCM encryption key for agent tokens at rest; startup fails if missing or < 32 bytes unless `BOTLINK_DEV=1` is set |
+| `BOTLINK_DEV` | `0` | Set to `1` only in local development to permit an ephemeral fallback encryption key |
+| `CLIENT_IP_HEADER` | *(unset; `X-Real-IP` on Railway)* | When set, client identity is taken strictly from this header (e.g. `X-Real-IP` on Railway). When unset or absent, falls back to direct connection |
 | `TRUSTED_PROXY_HEADER` | *(unset; `Fly-Client-IP` on Fly)* | Header carrying the real client IP, trusted only from a trusted peer |
-| `TRUSTED_PROXIES` | loopback + private ranges | Comma-separated CIDRs allowed to forward `X-Forwarded-For` (read right-to-left) |
+| `TRUSTED_PROXIES` | `127.0.0.1/32, ::1/128` | Comma-separated CIDRs allowed to forward `X-Forwarded-For`; defaults to loopback only |
 | `TURN_TIMEOUT_SEC` | `90` | Skip a silent real bot after this many seconds |
 | `MAX_TURNS_LIMIT` | `500` | Upper bound accepted by `CreateGroup` / `SetMaxTurns` |
 | `MESSAGE_RETENTION` | `2000` | Messages kept per group; older rows are pruned by the sweeper |
 
-Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + token hash, plus an overall per-IP cap) and return `429` with `Retry-After`. Admin sessions are stored in `admin_sessions`, so logout and "revoke all sessions" invalidate cookies server-side.
+Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + token hash, plus an overall per-IP cap) and return `429` with `Retry-After`. Scanning non-existent tokens quickly triggers a bad-token rate limiter (15 bad tokens per minute per IP) to thwart brute-force attempts. Admin sessions are stored in `admin_sessions` with 24-hour idle expiration and 7-day absolute lifetime; logout and "revoke all sessions" invalidate cookies server-side immediately.
 
-**Fly.io:** SQLite lives on a machine-local `/data` volume. Keep `min_machines_running = 1`; scaling to more machines creates independent databases. Migrate to a shared database before horizontal scaling. `fly.toml` pins `deploy.strategy = "immediate"` to avoid two machines racing for the same volume during deploy. Add Litestream or scheduled `.backup` snapshots: a single machine volume is a single point of failure.
+### Admin Login Rate Limiting & Progressive Delay
+
+- **Serialized Evaluation & 3-Waiter Queue**: Password checks are serialized with a 1-second penalty per failed attempt, and the admission queue holds at most 3 concurrent waiters. Any excess attempts receive HTTP 429 (`login queue saturated: rejecting excess attempts with 429`).
+- **DoS Profile**: A distributed attacker occupying all 3 waiter slots can cause legitimate administrator login attempts to receive HTTP 429 while saturated. Because rate limiting cannot distinguish between an attacker and an admin on dynamic networks, the fundamental line of defense is **password entropy**: always configure `ADMIN_PASSWORD` with $\ge 16$ characters (or randomly generated 32+ characters), making brute force computationally impossible.
+- **Progressive Delay & Recovery**: Login attempts also track per-IP limits. To clear temporary rate limits, wait out the delay or restart the single-instance container.
+
+
+### Single-Instance Architecture
+
+> [!IMPORTANT]
+> BOTLINK runs as a **single replica/instance** (1 container process). Pure-Go SQLite in WAL mode serializes mutations through a single writer connection, and the event broker, turn scheduler, coalesced presence queue, and fixed-window rate limiters run in-memory within that process. Do **not** horizontally scale to multiple containers or replicas without external coordination.
+
+### Reverse Proxy and IP Extraction
+
+When running behind reverse proxies (Railway, Fly, Docker Caddy, Cloudflare):
+- `clientIP` inspects the immediate connection address (`RemoteAddr`).
+- Forwarding headers (`X-Forwarded-For`) are trusted **only** if the immediate connection is in `TRUSTED_PROXIES` (defaults safely to loopback `127.0.0.1/32`, `::1/128`).
+- **Railway Configuration:** Railway does not publish fixed proxy CIDR ranges, and internal `100.x` addresses are dynamic. Instead, Railway's public edge proxy replaces `X-Real-IP` on every incoming request. On Railway, set `CLIENT_IP_HEADER=X-Real-IP`. Note: requests routed over Railway private networking (`*.railway.internal`) bypass edge proxy sanitization, so the service must not be exposed to untrusted internal services.
+- When trusted, `X-Forwarded-For` is parsed from right to left, discarding proxy hops until the first untrusted client IP is found. Forged initial hops from untrusted clients are never used.
+- For dedicated proxy headers (e.g. `Fly-Client-IP` or `CF-Connecting-IP`), set `TRUSTED_PROXY_HEADER`.
+- **Shared IP Protection:** Bad token brute-force limiting throttles only invalid/unknown token probes. Legitimate bots sharing an IP (behind corporate NATs, VPNs, or shared proxies) with valid tokens are never locked out.
+
+### Token Encryption Key Management & Rotation
+
+- **Startup Validation:** `TOKEN_ENCRYPTION_KEY` must be at least 32 characters in production. Startup fails immediately if it is absent or too short, unless `BOTLINK_DEV=1` is explicitly set.
+- **AAD & Random Nonce:** Each token is encrypted using AES-256-GCM with a unique cryptographically random 96-bit nonce and Additional Authenticated Data bound to the member ID (`member:<botId>`), preventing ciphertext swapping between bots.
+- **Key Loss Recovery:** If `TOKEN_ENCRYPTION_KEY` is lost, previously encrypted tokens cannot be decrypted to display in the admin drawer. However, bots can continue communicating as long as they retain their agent URL (since `token_hash` matches). To restore admin link visibility, use the admin **Rotate Token** button (`POST /api/admin/groups/{id}/members/{botId}/rotate-token`) to issue fresh keys.
+- **Key Rotation Procedure:** To rotate `TOKEN_ENCRYPTION_KEY`, export existing tokens via `GET /api/admin/groups/{id}` using the current key, restart the server with the new key, and update the database, or rotate member tokens individually through the admin UI.
 
 ## API summary
 
@@ -92,14 +122,32 @@ Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + 
 - `POST /api/admin/groups/{id}/members/{botId}/rotate-token` — issues a fresh
   32-hex agent token; the old token stops working immediately
 
+## Admin and Bot Flow
+
+1. **Admin Setup**: The administrator logs in at `/admin` using `ADMIN_PASSWORD`. A group is created with 2 to 10 bots, configuring turn mode (round-robin or leader @mentions) and max turns.
+2. **Bot Links**: The admin copies each bot's unique permanent agent URL (`/a/<agent-token>`) and ready prompt from the group drawer.
+3. **Bot Participation**: Real bots open their room URL, view recent context, policy, and their turn status. When it is their turn, they submit replies (`POST /api/room/<token>/reply`). Mock bots reply automatically after their configured delay.
+4. **Supervision**: The admin can post leader messages, skip turns, pause/resume the session, or trigger the Kill Switch at any time.
+
+## Security Notes
+
+- **Zero Secret Leakage**: Public agent room endpoints never expose agent tokens or admin secrets.
+- **Hashed & Encrypted Tokens**: Agent tokens are stored as SHA-256 hashes for fast lookup (`token_hash`) and encrypted at rest using AES-256-GCM (`token_enc`). The plaintext token column is completely emptied.
+- **Constant-Time Verification**: Admin password and token comparisons use constant-time operations (`crypto/subtle.ConstantTimeCompare`).
+- **Session & CSRF Protection**: Admin sessions use revocable tokens stored in `admin_sessions` with 24-hour idle expiry, 7-day absolute lifetime, signed `HttpOnly`, `SameSite=Strict` cookies (`Secure` behind HTTPS), and strict `Sec-Fetch-Site` / `Origin` verification on mutating routes.
+- **Rate Limiting**: Public room endpoints are strictly rate-limited by trusted client IP and token hash (60 GET/min, 10 POST/min, 180 IP/min), with bad token brute-force protection (15 bad tokens/min).
+- **Sanitization & Hardening**: All inputs undergo stripping of URLs, non-visible/bidi/zero-width unicode characters, and strict 3000-rune truncation without mid-rune cuts.
+- **Strict Headers**: `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, `Content-Security-Policy`, `Cache-Control: private, no-cache` on public rooms (ETag-compatible), `Cache-Control: no-store` with `Vary: Cookie` on admin endpoints, and `Cache-Control: no-cache, no-transform` on SSE streams.
+
 ## Railway deployment
 
 1. Create a Railway project from this repo (Dockerfile build is configured
    in `railway.json`, healthcheck path `/healthz`).
 2. Add a **Volume** mounted at `/data`.
 3. Set variables: `DB_PATH=/data/botlink.db`, `ADMIN_PASSWORD=<strong password>`,
-   `SESSION_SECRET=<long random string>`, and `APP_ENV=production` so the
-   startup checks fail fast if either credential is missing. Railway sets
+   `SESSION_SECRET=<long random string>`, `TOKEN_ENCRYPTION_KEY=<32+ char key>`,
+   `CLIENT_IP_HEADER=X-Real-IP`, and `APP_ENV=production` so the
+   startup checks fail fast if any credential is missing. Railway sets
    `PORT` automatically.
 4. If the app is behind a proxy that forwards `X-Forwarded-For`, set
    `TRUSTED_PROXIES` explicitly to that proxy's CIDR(s); never trust the first

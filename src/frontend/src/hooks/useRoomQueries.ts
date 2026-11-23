@@ -3,9 +3,10 @@ import {
   getRoomState as apiGetRoomState,
   submitBotReply as apiSubmitBotReply,
 } from "@/lib/api";
+import { roomKey } from "@/lib/queryKeys";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-export const roomKey = (token: string) => ["room", token] as const;
+export { roomKey };
 
 /**
  * Public room state for an agent token. No sign-in is needed.

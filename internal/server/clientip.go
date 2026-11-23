@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// DefaultTrustedProxies covers loopback, RFC1918 and IPv6 ULA, which are the
-// addresses used by Caddy on the same host and by the Fly proxy hop.
+// DefaultTrustedProxies covers loopback only, ensuring safe defaults when
+// TRUSTED_PROXIES is unset. Operators behind reverse proxies (like Railway)
+// must configure TRUSTED_PROXIES explicitly.
 var DefaultTrustedProxies = []string{
-	"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-	"::1/128", "fc00::/7",
+	"127.0.0.1/32", "::1/128",
 }
 
 // ParseCIDRs is exported so the entry point can parse TRUSTED_PROXIES.
@@ -64,12 +64,26 @@ func (s *Server) trustedPeer(r *http.Request) bool {
 	return ipInNets(normalizeIP(r.RemoteAddr), s.trustedProxies)
 }
 
-// clientIP only trusts forwarding headers when the immediate peer is a
-// configured proxy. The first X-Forwarded-For element is never used.
+// clientIP resolves the client IP.
+// If CLIENT_IP_HEADER is configured, client identity is taken strictly from
+// that header. When unset or the header is absent, it falls back to the direct
+// connection address.
 func (s *Server) clientIP(r *http.Request) string {
 	peer := normalizeIP(r.RemoteAddr)
-	peerTrusted := s.trustedPeer(r)
 
+	if s.clientIPHeader != "" {
+		if raw := r.Header.Get(s.clientIPHeader); raw != "" {
+			if ip := normalizeIP(raw); ip != nil {
+				return ip.String()
+			}
+		}
+		if peer == nil {
+			return r.RemoteAddr
+		}
+		return peer.String()
+	}
+
+	peerTrusted := s.trustedPeer(r)
 	if s.trustedProxyHeader != "" && (peerTrusted || s.trustHeaderAlways) {
 		if ip := normalizeIP(r.Header.Get(s.trustedProxyHeader)); ip != nil {
 			return ip.String()

@@ -1,6 +1,6 @@
-import type { GroupDetail } from "@/lib/api";
 import BotAvatar from "@/components/chat/BotAvatar";
 import type { GroupControls } from "@/components/chat/useGroupControls";
+import type { GroupDetail } from "@/lib/api";
 import { formatNumberAr, isMemberOnline } from "@/lib/convert";
 import { cn } from "@/lib/utils";
 import { Link } from "@tanstack/react-router";

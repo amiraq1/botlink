@@ -4,7 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"time"
 )
+
+// SessionIdleTimeoutMs defines the idle timeout for admin sessions (24 hours).
+const SessionIdleTimeoutMs = int64(24 * 60 * 60 * 1000)
 
 // NewSessionID returns a fresh 128-bit random id for a signed admin cookie.
 func NewSessionID() (string, error) {
@@ -18,8 +22,8 @@ func NewSessionID() (string, error) {
 // CreateAdminSession persists a session so logout can revoke it server-side.
 func (s *Store) CreateAdminSession(ctx context.Context, id string, createdAt, expiresAt int64) error {
 	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO admin_sessions (id, created_at, expires_at, revoked_at) VALUES (?, ?, ?, NULL)",
-		id, createdAt, expiresAt)
+		"INSERT INTO admin_sessions (id, created_at, expires_at, last_active_at, revoked_at) VALUES (?, ?, ?, ?, NULL)",
+		id, createdAt, expiresAt, createdAt)
 	return err
 }
 
@@ -37,22 +41,38 @@ func (s *Store) RevokeAllAdminSessions(ctx context.Context, nowMs int64) error {
 	return err
 }
 
-// IsAdminSessionValid fails closed on any database error.
+// IsAdminSessionValid checks validity, absolute expiry, and idle timeout.
+// It fails closed on any database error.
 func (s *Store) IsAdminSessionValid(ctx context.Context, id string, nowMs int64) bool {
 	var revoked any
 	var expiresAt int64
+	var lastActiveAt int64
 	err := s.ro.QueryRowContext(ctx,
-		"SELECT expires_at, revoked_at FROM admin_sessions WHERE id = ?", id).
-		Scan(&expiresAt, &revoked)
+		"SELECT expires_at, last_active_at, revoked_at FROM admin_sessions WHERE id = ?", id).
+		Scan(&expiresAt, &lastActiveAt, &revoked)
 	if err != nil {
 		return false
 	}
-	return revoked == nil && expiresAt > nowMs
+	if revoked != nil || expiresAt <= nowMs {
+		return false
+	}
+	if lastActiveAt > 0 && (nowMs-lastActiveAt) > SessionIdleTimeoutMs {
+		return false
+	}
+	if nowMs-lastActiveAt > 60_000 {
+		go func() {
+			c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, _ = s.db.ExecContext(c, "UPDATE admin_sessions SET last_active_at = ? WHERE id = ?", nowMs, id)
+		}()
+	}
+	return true
 }
 
 // DeleteExpiredSessions keeps the session table bounded.
 func (s *Store) DeleteExpiredSessions(ctx context.Context, nowMs int64) error {
 	_, err := s.db.ExecContext(ctx,
-		"DELETE FROM admin_sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL", nowMs)
+		"DELETE FROM admin_sessions WHERE expires_at <= ? OR (last_active_at > 0 AND ? - last_active_at > ?) OR revoked_at IS NOT NULL",
+		nowMs, nowMs, SessionIdleTimeoutMs)
 	return err
 }

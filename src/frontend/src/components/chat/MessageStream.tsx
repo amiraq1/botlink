@@ -1,10 +1,10 @@
-import type { GroupDetail, Message } from "@/lib/api";
 import GroupIntroCard from "@/components/chat/GroupIntroCard";
 import MessageBubble from "@/components/chat/MessageBubble";
+import type { GroupDetail, Message } from "@/lib/api";
 import { dayKey, formatDayDividerAr } from "@/lib/convert";
 import { isLongGap } from "@/lib/messageGap";
 import { ArrowDown, MessageCircle } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const PIN_THRESHOLD_PX = 80;
 
@@ -63,12 +63,12 @@ export default function MessageStream({
     setShowJump(!atEnd);
   };
 
-  // Runs after every render (polling updates included); only moves when pinned.
+  // Scroll only when the list grows; only moves when pinned to the bottom.
   useEffect(() => {
-    if (pinned.current) scrollToEnd(false);
-  });
+    if (detail.messages.length > 0 && pinned.current) scrollToEnd(false);
+  }, [detail.messages.length, scrollToEnd]);
 
-  const items = buildItems(detail.messages);
+  const items = useMemo(() => buildItems(detail.messages), [detail.messages]);
 
   return (
     <div className="relative min-h-0 flex-1">

@@ -1,7 +1,7 @@
-import type { MemberView } from "@/lib/api";
 import BotAvatar from "@/components/chat/BotAvatar";
 import CopyButton from "@/components/chat/CopyButton";
 import { useRemoveMember, useRotateMemberToken } from "@/hooks/useAdminQueries";
+import type { MemberView } from "@/lib/api";
 import { buildAgentPrompt, buildAgentUrl, isMemberOnline } from "@/lib/convert";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Trash2 } from "lucide-react";

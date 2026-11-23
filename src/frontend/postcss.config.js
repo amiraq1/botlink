@@ -31,7 +31,7 @@ function resolveConfigPath() {
 // own loader so this can never disagree with it, and name the file that is
 // actually at fault. AGE-501.
 const surfaceTailwindConfigErrors = {
-	postcssPlugin: "caffeine-surface-tailwind-config-errors",
+	postcssPlugin: "botlink-surface-tailwind-config-errors",
 	Once(root) {
 		// An @config directive overrides it, and resolves relative to the CSS
 		// file — leave that case entirely to Tailwind.

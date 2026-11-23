@@ -1,7 +1,3 @@
-import AdminGate from "@/components/AdminGate";
-import AdminDashboardPage from "@/pages/AdminDashboardPage";
-import AgentRoomPage from "@/pages/AgentRoomPage";
-import GroupChatPage from "@/pages/GroupChatPage";
 import {
   Link,
   Outlet,
@@ -11,6 +7,34 @@ import {
   createRouter,
   useParams,
 } from "@tanstack/react-router";
+import { Suspense, lazy } from "react";
+
+const AdminGate = lazy(() => import("@/components/AdminGate"));
+const AdminDashboardPage = lazy(() => import("@/pages/AdminDashboardPage"));
+const AgentRoomPage = lazy(() => import("@/pages/AgentRoomPage"));
+const GroupChatPage = lazy(() => import("@/pages/GroupChatPage"));
+
+/** Dark placeholder for the admin shell while its chunk loads. */
+function AdminPending() {
+  return (
+    <div className="dark flex min-h-dvh items-center justify-center bg-background">
+      <span className="font-mono text-sm text-muted-foreground" dir="rtl">
+        …
+      </span>
+    </div>
+  );
+}
+
+/** Plain placeholder for the public agent room while its chunk loads. */
+function RoomPending() {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-background">
+      <span className="font-mono text-sm font-bold text-foreground">
+        Loading...
+      </span>
+    </div>
+  );
+}
 
 const rootRoute = createRootRoute({ component: Outlet });
 
@@ -20,23 +44,33 @@ const adminShellRoute = createRoute({
   id: "admin-shell",
   component: function AdminShell() {
     return (
-      <AdminGate>
-        <Outlet />
-      </AdminGate>
+      <Suspense fallback={<AdminPending />}>
+        <AdminGate>
+          <Outlet />
+        </AdminGate>
+      </Suspense>
     );
   },
 });
 
+function AdminDashboardRoute() {
+  return (
+    <Suspense fallback={<AdminPending />}>
+      <AdminDashboardPage />
+    </Suspense>
+  );
+}
+
 const indexRoute = createRoute({
   getParentRoute: () => adminShellRoute,
   path: "/",
-  component: AdminDashboardPage,
+  component: AdminDashboardRoute,
 });
 
 const adminRoute = createRoute({
   getParentRoute: () => adminShellRoute,
   path: "/admin",
-  component: AdminDashboardPage,
+  component: AdminDashboardRoute,
 });
 
 const groupChatRoute = createRoute({
@@ -44,7 +78,11 @@ const groupChatRoute = createRoute({
   path: "/admin/g/$id",
   component: function GroupChatRoute() {
     const { id } = useParams({ strict: false });
-    return <GroupChatPage id={id ?? ""} />;
+    return (
+      <Suspense fallback={<AdminPending />}>
+        <GroupChatPage id={id ?? ""} />
+      </Suspense>
+    );
   },
 });
 
@@ -54,7 +92,11 @@ const agentRoomRoute = createRoute({
   path: "/a/$token",
   component: function AgentRoomRoute() {
     const { token } = useParams({ strict: false });
-    return <AgentRoomPage token={token ?? ""} />;
+    return (
+      <Suspense fallback={<RoomPending />}>
+        <AgentRoomPage token={token ?? ""} />
+      </Suspense>
+    );
   },
 });
 

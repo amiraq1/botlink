@@ -9,6 +9,7 @@ import {
 } from "@/components/agent-room/roomStatus";
 import { useSmartWait } from "@/components/agent-room/useSmartWait";
 import { Button } from "@/components/ui/button";
+import { useRoomEvents } from "@/hooks/useLiveEvents";
 import { useRoomState } from "@/hooks/useRoomQueries";
 
 function PlainMessage({ children }: { children: React.ReactNode }) {
@@ -25,6 +26,10 @@ function PlainMessage({ children }: { children: React.ReactNode }) {
 export default function AgentRoomPage({ token }: { token: string }) {
   const { data, isLoading, isError, refetch } = useRoomState(token, 0);
   const { waiting, stillWaiting, start, resetStill } = useSmartWait(refetch);
+  // Live push when available; the 18s wait button remains the fallback path.
+  useRoomEvents(token, () => {
+    void refetch();
+  });
 
   if (data === null) {
     return (
