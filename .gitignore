@@ -17,3 +17,7 @@ scratchpad/
 review-package.txt
 .commandcode/
 .workbuddy-ai/
+src/frontend/dist/
+tests/e2e/.cache/
+ev/
+

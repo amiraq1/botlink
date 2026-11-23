@@ -16,6 +16,13 @@ jobs:
       # All actions are pinned to exact 40-char commit SHAs (HEAD as resolved
       # via `git ls-remote https://github.com/<owner>/<repo> HEAD` on 2026-11-21).
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@bcfb9cce635345aac9996cedc19b2de8e01b894f
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Go
         uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
