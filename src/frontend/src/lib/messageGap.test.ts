@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLongGap, LONG_GAP_MS } from "./messageGap";
+import { LONG_GAP_MS, isLongGap } from "./messageGap";
 
 test("two-hour gap is measured in milliseconds", () => {
   const start = 1_700_000_000_000;
