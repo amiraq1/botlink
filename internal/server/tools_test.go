@@ -332,8 +332,8 @@ func TestRoomToolCall_TokenLeakTest(t *testing.T) {
 		Enabled:        true,
 		Kind:           store.ToolKindHTTPWebhook,
 		WebhookURL:     "https://internal-api.example.com/secret-endpoint",
-		WebhookHeaders: map[string]string{"X-Secret-Key": "ultra-sensitive-key-999"},
-		WebhookSecret:  "hmac-signing-secret-888",
+		WebhookHeaders: map[string]string{"X-Test-Header": "test-header-value"},
+		WebhookSecret:  "test-webhook-secret",
 	}
 	recTool := doReq(t, srv, "POST", "/api/admin/tools", in, cookie)
 	if recTool.Code != http.StatusCreated {
