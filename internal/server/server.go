@@ -193,8 +193,10 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+const maxRoomPayloadBytes = 64 * 1024
+
+func decodeJSONLimited(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
@@ -202,6 +204,14 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSONLimited(w, r, dst, 1<<20)
+}
+
+func decodeRoomJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSONLimited(w, r, dst, maxRoomPayloadBytes)
 }
 
 func (s *Server) nowMs() int64 {
@@ -543,20 +553,12 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
 	now := time.Now()
 
-	// 1. Check global per-IP limit before parsing body or reading database
+	// 1. Check global per-IP limit before reading database or parsing body
 	if !s.checkIPLimit(w, ip, now) {
 		return
 	}
 
-	var body struct {
-		ExpectedTurnSeq int64  `json:"expectedTurnSeq"`
-		Content         string `json:"content"`
-	}
-	if !decodeJSON(w, r, &body) {
-		return
-	}
-
-	// 2. Read-only token check (does not update presence or submit reply)
+	// 2. Read-only token check (does not update presence or read request body)
 	exists, err := s.store.MemberExistsByToken(r.Context(), token)
 	if err != nil {
 		s.handleStoreErr(w, err)
@@ -573,12 +575,21 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Token rate limit check BEFORE submitting reply or updating presence
+	// 3. Token rate limit check BEFORE reading body or updating presence
 	if !s.roomTokenRateOK(w, r, token, true) {
 		return
 	}
 
-	// 4. Submit reply and update presence
+	// 4. Parse request body capped at 64KB
+	var body struct {
+		ExpectedTurnSeq int64  `json:"expectedTurnSeq"`
+		Content         string `json:"content"`
+	}
+	if !decodeRoomJSON(w, r, &body) {
+		return
+	}
+
+	// 5. Submit reply and update presence
 	accepted, err := s.store.SubmitBotReply(r.Context(), token, body.ExpectedTurnSeq, body.Content, s.nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)

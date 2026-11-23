@@ -1265,3 +1265,62 @@ func TestRoomStateConcurrentRotationDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected private, no-cache header, got: %s", rec.Header().Get("Cache-Control"))
 	}
 }
+
+type trackingReader struct {
+	r         *strings.Reader
+	readBytes int64
+}
+
+func (tr *trackingReader) Read(p []byte) (n int, err error) {
+	n, err = tr.r.Read(p)
+	tr.readBytes += int64(n)
+	return n, err
+}
+
+func TestRoomPayloadCapAndLazyBodyReading(t *testing.T) {
+	srv, st := newTestServer(t, "secret123")
+	gid, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
+		Name:     "Test Group",
+		TurnMode: "auto_round_robin",
+		MaxTurns: 10,
+		Members: []store.MemberInput{
+			{Name: "Bot 1", RoleTitle: "Worker", AccentColor: "#ff0000", IsMock: false},
+			{Name: "Bot 2", RoleTitle: "Worker", AccentColor: "#00ff00", IsMock: false},
+		},
+	}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := st.GetGroupDetail(context.Background(), gid, 1000)
+	if err != nil || len(detail.Members) == 0 {
+		t.Fatalf("get detail: %v", err)
+	}
+	validToken := detail.Members[0].AgentToken
+
+	// 1. Invalid token with large body (100KB) -> must be rejected without reading body
+	largeJSON := `{"expectedTurnSeq":1,"content":"` + strings.Repeat("A", 100*1024) + `"}`
+	tracker := &trackingReader{r: strings.NewReader(largeJSON)}
+	reqInvalid := httptest.NewRequest("POST", "/api/room/invalid-token-12345/reply", tracker)
+	reqInvalid.Header.Set("Content-Type", "application/json")
+	recInvalid := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recInvalid, reqInvalid)
+
+	if recInvalid.Code != http.StatusNotFound && recInvalid.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 404 or 429 for invalid token, got: %d", recInvalid.Code)
+	}
+	if tracker.readBytes > 0 {
+		t.Fatalf("expected 0 bytes read for invalid token, but server read %d bytes before token check", tracker.readBytes)
+	}
+
+	// 2. Valid token with body > 64KB (e.g. 70KB) -> must be rejected due to 64KB cap
+	body70KB := `{"expectedTurnSeq":1,"content":"` + strings.Repeat("B", 70*1024) + `"}`
+	reqValidTooBig := httptest.NewRequest("POST", "/api/room/"+validToken+"/reply", strings.NewReader(body70KB))
+	reqValidTooBig.Header.Set("Content-Type", "application/json")
+	recValidTooBig := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(recValidTooBig, reqValidTooBig)
+
+	if recValidTooBig.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for payload > 64KB, got: %d (body: %s)", recValidTooBig.Code, recValidTooBig.Body.String())
+	}
+}
