@@ -735,7 +735,7 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 		return "", err
 	}
 	h := HashToken(token)
-	enc, err := EncryptToken(s.key(), token, MemberAAD(botID))
+	enc, err := EncryptToken(s.key(), token, MemberAAD(groupID, botID))
 	if err != nil {
 		return "", err
 	}

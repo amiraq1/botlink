@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 var (
@@ -24,14 +25,16 @@ func HashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// MemberAAD returns the Additional Authenticated Data bound to a member's encrypted token.
-func MemberAAD(botID string) []byte {
-	return []byte("member:" + botID)
+// MemberAAD returns the Additional Authenticated Data bound to a member's encrypted token,
+// tying the ciphertext cryptographically to both the group ID and the member's bot ID.
+func MemberAAD(groupID int64, botID string) []byte {
+	return []byte(fmt.Sprintf("botlink:member:%d:%s", groupID, botID))
 }
 
 // EncryptToken encrypts the plain agent token with AES-256-GCM.
 // A cryptographically random 12-byte nonce is generated for every encryption.
-// The optional aad binds ciphertext to additional authenticated data (e.g. member ID).
+// The aad binds ciphertext to additional authenticated data (groupID and botID).
+// Output is prefixed with the version tag "v1:".
 func EncryptToken(key []byte, token string, aad []byte) (string, error) {
 	if len(key) < 32 {
 		return "", ErrKeyTooShort
@@ -51,15 +54,20 @@ func EncryptToken(key []byte, token string, aad []byte) (string, error) {
 	}
 
 	sealed := gcm.Seal(nonce, nonce, []byte(token), aad)
-	return hex.EncodeToString(sealed), nil
+	return "v1:" + hex.EncodeToString(sealed), nil
 }
 
 // DecryptToken decrypts an AES-256-GCM hex-encoded token verifying aad.
+// It requires the "v1:" version prefix.
 func DecryptToken(key []byte, encHex string, aad []byte) (string, error) {
 	if len(key) < 32 {
 		return "", ErrKeyTooShort
 	}
-	data, err := hex.DecodeString(encHex)
+	if !strings.HasPrefix(encHex, "v1:") {
+		return "", ErrDecryptionFailed
+	}
+	payload := strings.TrimPrefix(encHex, "v1:")
+	data, err := hex.DecodeString(payload)
 	if err != nil {
 		return "", ErrDecryptionFailed
 	}

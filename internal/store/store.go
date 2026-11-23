@@ -849,7 +849,7 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		key := s.key()
 		for _, u := range list {
 			h := HashToken(u.token)
-			enc, err := EncryptToken(key, u.token, MemberAAD(u.botID))
+			enc, err := EncryptToken(key, u.token, MemberAAD(u.groupID, u.botID))
 			if err != nil {
 				return fmt.Errorf("encrypt token for group %d bot %s: %w", u.groupID, u.botID, err)
 			}
@@ -889,7 +889,7 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		if err := rows.Scan(&gid, &bid, &th, &te); err != nil {
 			return fmt.Errorf("scan token row: %w", err)
 		}
-		plain, err := DecryptToken(key, te, MemberAAD(bid))
+		plain, err := DecryptToken(key, te, MemberAAD(gid, bid))
 		if err != nil {
 			return fmt.Errorf("migration verification failed: token_enc for group %d bot %s could not be decrypted: %w", gid, bid, err)
 		}
@@ -1118,7 +1118,7 @@ func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]M
 		}
 		m.IsMock = isMock != 0
 		if m.TokenEnc != "" && len(key) >= 32 {
-			if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.BotID)); err == nil {
+			if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.GroupID, m.BotID)); err == nil {
 				m.AgentToken = dec
 			}
 		}
@@ -1216,7 +1216,7 @@ func loadMemberByToken(ctx context.Context, q querier, token string, key []byte)
 	}
 	m.IsMock = isMock != 0
 	if m.TokenEnc != "" && len(key) >= 32 {
-		if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.BotID)); err == nil {
+		if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.GroupID, m.BotID)); err == nil {
 			m.AgentToken = dec
 		}
 	}
@@ -1376,7 +1376,7 @@ func insertMember(ctx context.Context, q querier, m *Member, plainToken string, 
 		isMock = 1
 	}
 	h := HashToken(plainToken)
-	enc, err := EncryptToken(key, plainToken, MemberAAD(m.BotID))
+	enc, err := EncryptToken(key, plainToken, MemberAAD(m.GroupID, m.BotID))
 	if err != nil {
 		return err
 	}
