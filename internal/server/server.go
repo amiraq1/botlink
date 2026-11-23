@@ -50,6 +50,8 @@ type Config struct {
 	Production bool
 	// CookieSecure explicitly forces the Secure attribute on cookies.
 	CookieSecure bool
+	// Logger, when provided, overrides the default logger (useful for tests to capture output race-free).
+	Logger *log.Logger
 	// Clock, when provided, overrides the millisecond time source for testing.
 	Clock func() int64
 }
@@ -105,11 +107,15 @@ func New(cfg Config, st *store.Store) *Server {
 	if clock == nil {
 		clock = func() int64 { return time.Now().UnixMilli() }
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = log.New(os.Stdout, "botlink: ", log.LstdFlags)
+	}
 	s := &Server{
 		cfg:                cfg,
 		store:              st,
 		mux:                http.NewServeMux(),
-		log:                log.New(os.Stdout, "botlink: ", log.LstdFlags),
+		log:                logger,
 		adminPassword:      cfg.AdminPassword,
 		sessionSecret:      cfg.SessionSecret,
 		clock:              clock,

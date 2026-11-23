@@ -38,6 +38,7 @@ func newTestServer(t *testing.T, adminPassword string) (*Server, *store.Store) {
 		FrontendDistDir: t.TempDir(), AdminPassword: adminPassword,
 		SessionSecret: secret,
 	}, st)
+	t.Cleanup(func() { srv.Close() })
 	return srv, st
 }
 

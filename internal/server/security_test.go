@@ -1111,6 +1111,7 @@ func TestRoomReplyRateLimitingDoesNotSaveMessage(t *testing.T) {
 }
 
 func TestBotPollingIntervalsRemainOnline(t *testing.T) {
+	leakOpt := goleak.IgnoreCurrent()
 	st := openTestStore(t)
 	secret, err := GenerateEphemeralSecret()
 	if err != nil {
@@ -1128,7 +1129,7 @@ func TestBotPollingIntervalsRemainOnline(t *testing.T) {
 	defer func() {
 		srv.Close()
 		st.Close()
-		goleak.VerifyNone(t, goleak.IgnoreCurrent())
+		goleak.VerifyNone(t, leakOpt)
 	}()
 
 	id, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
@@ -1215,6 +1216,10 @@ func eventually(t *testing.T, timeout, interval time.Duration, cond func() bool)
 
 func TestRoomStateConcurrentRotationDoesNotPanic(t *testing.T) {
 	srv, st := newTestServer(t, "secret123")
+	defer func() {
+		srv.Close()
+		st.Close()
+	}()
 	gid, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
 		Name:     "Test Group",
 		TurnMode: "auto_round_robin",
@@ -1281,6 +1286,10 @@ func (tr *trackingReader) Read(p []byte) (n int, err error) {
 
 func TestRoomPayloadCapAndLazyBodyReading(t *testing.T) {
 	srv, st := newTestServer(t, "secret123")
+	defer func() {
+		srv.Close()
+		st.Close()
+	}()
 	gid, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
 		Name:     "Test Group",
 		TurnMode: "auto_round_robin",
@@ -1344,6 +1353,7 @@ func TestProductionEnforcesSecureCookieOnPlainHTTPRequest(t *testing.T) {
 		SessionSecret:   secret,
 		Production:      true,
 	}, st)
+	defer srv.Close()
 
 	// Plain HTTP request without TLS and without any X-Forwarded-Proto header
 	loginBody := `{"password":"correct-production-password-12345"}`
@@ -1376,8 +1386,21 @@ func TestProductionEnforcesSecureCookieOnPlainHTTPRequest(t *testing.T) {
 
 func TestLoginQueueSaturationRateLimitedLog(t *testing.T) {
 	var logBuf bytes.Buffer
-	srv, _ := newTestServer(t, "correct-long-admin-password-16char")
-	srv.log = log.New(&logBuf, "", 0)
+	st := openTestStore(t)
+	defer st.Close()
+	secret, err := GenerateEphemeralSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Config{
+		Addr:            ":0",
+		DBPath:          filepath.Join(t.TempDir(), "log.db"),
+		FrontendDistDir: t.TempDir(),
+		AdminPassword:   "correct-long-admin-password-16char",
+		SessionSecret:   secret,
+		Logger:          log.New(&logBuf, "", 0),
+	}, st)
+	defer srv.Close()
 
 	var wg sync.WaitGroup
 
