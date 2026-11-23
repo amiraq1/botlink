@@ -1210,3 +1210,58 @@ func eventually(t *testing.T, timeout, interval time.Duration, cond func() bool)
 	}
 	t.Fatal("condition not met within timeout")
 }
+
+func TestRoomStateConcurrentRotationDoesNotPanic(t *testing.T) {
+	srv, st := newTestServer(t, "secret123")
+	gid, err := st.CreateGroup(context.Background(), store.CreateGroupInput{
+		Name:     "Test Group",
+		TurnMode: "auto_round_robin",
+		MaxTurns: 10,
+		Members: []store.MemberInput{
+			{Name: "Bot 1", RoleTitle: "Worker", AccentColor: "#ff0000", IsMock: false},
+			{Name: "Bot 2", RoleTitle: "Worker", AccentColor: "#00ff00", IsMock: false},
+		},
+	}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	detail, err := st.GetGroupDetail(context.Background(), gid, 1000)
+	if err != nil || len(detail.Members) == 0 {
+		t.Fatalf("get detail: %v", err)
+	}
+	token := detail.Members[0].AgentToken
+	if token == "" {
+		t.Fatal("empty agent token")
+	}
+
+	// Set hook to rotate token right before GetRoomState executes
+	srv.onBeforeGetRoomState = func() {
+		_, err := st.RotateToken(context.Background(), gid, "bot_1", 2000)
+		if err != nil {
+			t.Fatalf("rotate token in hook: %v", err)
+		}
+	}
+
+	req := httptest.NewRequest("GET", "/api/room/"+token, nil)
+	rec := httptest.NewRecorder()
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("PANIC occurred during concurrent token rotation: %v", r)
+		}
+	}()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got: %d", rec.Code)
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if body != "null" {
+		t.Fatalf("expected 'null' body, got: %q", body)
+	}
+	if rec.Header().Get("Cache-Control") != "private, no-cache" {
+		t.Fatalf("expected private, no-cache header, got: %s", rec.Header().Get("Cache-Control"))
+	}
+}

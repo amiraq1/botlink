@@ -78,6 +78,8 @@ type Server struct {
 	sched        *turnScheduler
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
+
+	onBeforeGetRoomState func() // hook for testing concurrent token mutation
 }
 
 const (
@@ -461,6 +463,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // Public room
 // ---------------------------------------------------------------------------
 
+func writeNull(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("null"))
+}
+
 func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	ip := s.clientIP(r)
@@ -485,10 +494,7 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 		}
 		s.badTokenLimiter.hit(ip, now)
 		// Unknown token: JSON null, mirroring the old ?RoomState.
-		w.Header().Set("Cache-Control", "private, no-cache")
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("null"))
+		writeNull(w)
 		return
 	}
 
@@ -497,10 +503,19 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.onBeforeGetRoomState != nil {
+		s.onBeforeGetRoomState()
+	}
+
 	// 4. Retrieve state and update presence
 	state, err := s.store.GetRoomState(r.Context(), token, s.nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
+		return
+	}
+	if state == nil {
+		// Member was deleted or rotated concurrently after the existence check
+		writeNull(w)
 		return
 	}
 	writeJSONConditional(w, r, roomETagSeed(state), state)
