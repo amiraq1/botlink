@@ -253,7 +253,7 @@ func (s *Store) CreateGroup(ctx context.Context, in CreateGroupInput, nowMs int6
 		groupID = id
 		for i, mi := range in.Members {
 			m := buildMember(id, i+1, mi, tokens[i])
-			if err := insertMember(ctx, conn, &m); err != nil {
+			if err := insertMember(ctx, conn, &m, tokens[i], s.key()); err != nil {
 				return err
 			}
 		}
@@ -321,7 +321,7 @@ func (s *Store) GetGroupDetailPaged(ctx context.Context, id, nowMs, beforeID, af
 	if err != nil {
 		return nil, err
 	}
-	ms, err := loadMembers(ctx, s.ro, id)
+	ms, err := loadMembers(ctx, s.ro, id, s.key())
 	if err != nil {
 		return nil, err
 	}
@@ -333,7 +333,7 @@ func (s *Store) GetGroupDetailPaged(ctx context.Context, id, nowMs, beforeID, af
 		if g, err = loadGroup(ctx, s.ro, id); err != nil {
 			return nil, err
 		}
-		if ms, err = loadMembers(ctx, s.ro, id); err != nil {
+		if ms, err = loadMembers(ctx, s.ro, id, s.key()); err != nil {
 			return nil, err
 		}
 	}
@@ -616,7 +616,7 @@ func (s *Store) AddMember(ctx context.Context, groupID int64, in MemberInput, no
 		if err != nil {
 			return err
 		}
-		ms, err := loadMembers(ctx, conn, groupID)
+		ms, err := loadMembers(ctx, conn, groupID, s.key())
 		if err != nil {
 			return err
 		}
@@ -624,8 +624,9 @@ func (s *Store) AddMember(ctx context.Context, groupID int64, in MemberInput, no
 			return wrapErr(ErrValidation, "A group can have at most 10 members")
 		}
 		var exists int
+		h := HashToken(token)
 		if err := conn.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM bot_members WHERE agent_token = ?", token).Scan(&exists); err != nil {
+			"SELECT COUNT(*) FROM bot_members WHERE token_hash = ? OR agent_token = ?", h, token).Scan(&exists); err != nil {
 			return err
 		}
 		if exists > 0 {
@@ -648,7 +649,7 @@ func (s *Store) AddMember(ctx context.Context, groupID int64, in MemberInput, no
 			highest = int(highestMsg)
 		}
 		m := buildMember(groupID, highest+1, in, token)
-		if err := insertMember(ctx, conn, &m); err != nil {
+		if err := insertMember(ctx, conn, &m, token, s.key()); err != nil {
 			return err
 		}
 		g.UpdatedAt = nowMs
@@ -733,13 +734,18 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 	if err != nil {
 		return "", err
 	}
+	h := HashToken(token)
+	enc, err := EncryptToken(s.key(), token)
+	if err != nil {
+		return "", err
+	}
 	err = s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		if _, err := loadGroup(ctx, conn, groupID); err != nil {
 			return err
 		}
 		res, err := conn.ExecContext(ctx,
-			"UPDATE bot_members SET agent_token = ? WHERE group_id = ? AND bot_id = ?",
-			token, groupID, botID)
+			"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = '' WHERE group_id = ? AND bot_id = ?",
+			h, enc, groupID, botID)
 		if err != nil {
 			return err
 		}
@@ -770,7 +776,7 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 // GetRoomState is a read-only poll in the common case. Presence is queued
 // for the background flusher and unknown tokens never touch the writer.
 func (s *Store) GetRoomState(ctx context.Context, token string, nowMs int64) (*RoomState, error) {
-	m, err := loadMemberByToken(ctx, s.ro, token)
+	m, err := loadMemberByToken(ctx, s.ro, token, s.key())
 	if err != nil || m == nil {
 		return nil, err // unknown token -> nil state, like Motoko
 	}
@@ -823,12 +829,13 @@ func (s *Store) GetRoomState(ctx context.Context, token string, nowMs int64) (*R
 func (s *Store) SubmitBotReply(ctx context.Context, token string, expectedTurnSeq int64, rawContent string, nowMs int64) (bool, error) {
 	accepted := false
 	err := s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		m, err := loadMemberByToken(ctx, conn, token)
+		m, err := loadMemberByToken(ctx, conn, token, s.key())
 		if err != nil || m == nil {
 			return err
 		}
+		h := HashToken(token)
 		_, _ = conn.ExecContext(ctx,
-			"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", nowMs, token)
+			"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ? OR agent_token = ?", nowMs, h, token)
 		g, err := loadGroup(ctx, conn, m.GroupID)
 		if err != nil {
 			return err

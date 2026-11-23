@@ -55,7 +55,7 @@ func seedBenchMessages(b *testing.B, st *Store, groupID int64, n int, now int64)
 func markBenchOnline(b *testing.B, st *Store, token string, now int64) {
 	b.Helper()
 	if _, err := st.db.ExecContext(context.Background(),
-		"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?", now, token); err != nil {
+		"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ? OR agent_token = ?", now, HashToken(token), token); err != nil {
 		b.Fatalf("mark online: %v", err)
 	}
 }

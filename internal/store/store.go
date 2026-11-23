@@ -7,11 +7,13 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,6 +132,8 @@ type Member struct {
 	AccentColor string `json:"accentColor"`
 	IsMock      bool   `json:"isMock"`
 	AgentToken  string `json:"agentToken"`
+	TokenHash   string `json:"-"`
+	TokenEnc    string `json:"-"`
 	LastSeenAt  int64  `json:"lastSeenAt"`
 	Online      bool   `json:"online"`
 }
@@ -224,6 +228,8 @@ type Store struct {
 	// writer is active, so polling never queues behind a write transaction.
 	ro *sql.DB
 
+	encryptionKey []byte
+
 	presenceMu   sync.Mutex
 	presence     map[string]presenceEntry
 	lastPruneMs  int64
@@ -238,6 +244,21 @@ type Store struct {
 	onChange func(int64)
 
 	turnTimeoutMs int64
+}
+
+// SetEncryptionKey sets the AES-256-GCM encryption key used for securing agent tokens at rest.
+func (s *Store) SetEncryptionKey(key []byte) {
+	if len(key) >= 32 {
+		s.encryptionKey = append([]byte(nil), key[:32]...)
+	}
+}
+
+func (s *Store) key() []byte {
+	if len(s.encryptionKey) >= 32 {
+		return s.encryptionKey
+	}
+	defaultKey := sha256.Sum256([]byte("botlink-default-encryption-key-for-dev"))
+	return defaultKey[:]
 }
 
 const (
@@ -280,14 +301,41 @@ func readPoolSize() int {
 	return n
 }
 
+func backupDatabase(path string) error {
+	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file::memory:") {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return nil
+	}
+	bakPath := path + ".bak"
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+
+	dst, err := os.Create(bakPath)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+
+	_, err = io.Copy(dst, src)
+	return err
+}
+
 // Open creates parent directories, opens (or creates) the SQLite database
 // and applies the schema with WAL mode, foreign keys and a busy timeout.
-func Open(path string) (*Store, error) {
+// An optional encryption key (at least 32 bytes) can be provided for token encryption.
+func Open(path string, encryptionKey ...[]byte) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create db dir: %w", err)
 		}
 	}
+	_ = backupDatabase(path)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -303,6 +351,9 @@ func Open(path string) (*Store, error) {
 		presenceStop:  make(chan struct{}),
 		lastPruneMs:   time.Now().UnixMilli(),
 		turnTimeoutMs: DefaultTurnTimeoutSec * 1000,
+	}
+	if len(encryptionKey) > 0 && len(encryptionKey[0]) > 0 {
+		s.SetEncryptionKey(encryptionKey[0])
 	}
 	// MaxOpenConns=1 pins every PRAGMA below to the single writer conn.
 	// Read-side tuning (temp_store, cache_size, mmap) travels in the read DSN:
@@ -432,13 +483,14 @@ func (s *Store) FlushPresence(ctx context.Context) error {
 	}
 	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		stmt, err := conn.PrepareContext(ctx,
-			"UPDATE bot_members SET last_seen_at = ? WHERE agent_token = ?")
+			"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ? OR agent_token = ?")
 		if err != nil {
 			return err
 		}
 		defer stmt.Close()
 		for token, at := range pending {
-			if _, err := stmt.ExecContext(ctx, at, token); err != nil {
+			h := HashToken(token)
+			if _, err := stmt.ExecContext(ctx, at, h, token); err != nil {
 				return err
 			}
 		}
@@ -513,7 +565,9 @@ CREATE TABLE IF NOT EXISTS bot_members (
   role_title TEXT NOT NULL DEFAULT '',
   accent_color TEXT NOT NULL DEFAULT '',
   is_mock INTEGER NOT NULL DEFAULT 0,
-  agent_token TEXT NOT NULL UNIQUE,
+  agent_token TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL DEFAULT '',
+  token_enc TEXT NOT NULL DEFAULT '',
   last_seen_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (group_id, bot_id)
 );
@@ -532,6 +586,7 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
   id TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL DEFAULT 0,
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, id);
@@ -545,38 +600,99 @@ DROP INDEX IF EXISTS idx_members_presence;
 	if err != nil {
 		return err
 	}
-	// Existing databases created before the silent-turn circuit breaker need
-	// the new column; ALTER is idempotent via a pragma check.
-	rows, err := ctxQuery(ctx, s.db, "PRAGMA table_info(groups)")
+
+	if err := s.ensureColumn(ctx, "groups", "skip_streak", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "groups", "current_turn_bot_id", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "bot_members", "token_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "bot_members", "token_enc", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "admin_sessions", "last_active_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, _ = s.db.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS idx_members_token_hash ON bot_members(token_hash)")
+
+	return s.migrateUnencryptedTokens(ctx)
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, col, colDef string) error {
+	rows, err := ctxQuery(ctx, s.db, "PRAGMA table_info("+table+")")
 	if err != nil {
 		return err
 	}
-	hasSkipStreak := false
+	defer rows.Close()
+	found := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
 		var notnull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			rows.Close()
 			return err
 		}
-		if name == "skip_streak" {
-			hasSkipStreak = true
+		if name == col {
+			found = true
+			break
 		}
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
 		return err
 	}
-	rows.Close()
-	if !hasSkipStreak {
-		if _, err := s.db.ExecContext(ctx,
-			"ALTER TABLE groups ADD COLUMN skip_streak INTEGER NOT NULL DEFAULT 0"); err != nil {
+	if !found {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+col+" "+colDef); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
+	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		rows, err := conn.QueryContext(ctx,
+			"SELECT group_id, bot_id, agent_token FROM bot_members WHERE agent_token != '' AND token_hash = ''")
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+
+		type unmigrated struct {
+			groupID int64
+			botID   string
+			token   string
+		}
+		var list []unmigrated
+		for rows.Next() {
+			var u unmigrated
+			if err := rows.Scan(&u.groupID, &u.botID, &u.token); err != nil {
+				return err
+			}
+			list = append(list, u)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		key := s.key()
+		for _, u := range list {
+			h := HashToken(u.token)
+			enc, err := EncryptToken(key, u.token)
+			if err != nil {
+				return fmt.Errorf("encrypt token for group %d bot %s: %w", u.groupID, u.botID, err)
+			}
+			if _, err := conn.ExecContext(ctx,
+				"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = '' WHERE group_id = ? AND bot_id = ?",
+				h, enc, u.groupID, u.botID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // ctxQuery is a tiny helper so migrate can use QueryContext uniformly.
@@ -761,9 +877,9 @@ func loadGroup(ctx context.Context, q querier, id int64) (*Group, error) {
 	return g, err
 }
 
-func loadMembers(ctx context.Context, q querier, groupID int64) ([]Member, error) {
+func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]Member, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, last_seen_at
+		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, token_hash, token_enc, last_seen_at
 		 FROM bot_members WHERE group_id = ?`, groupID)
 	if err != nil {
 		return nil, err
@@ -774,10 +890,15 @@ func loadMembers(ctx context.Context, q querier, groupID int64) ([]Member, error
 		var m Member
 		var isMock int
 		if err := rows.Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
-			&isMock, &m.AgentToken, &m.LastSeenAt); err != nil {
+			&isMock, &m.AgentToken, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt); err != nil {
 			return nil, err
 		}
 		m.IsMock = isMock != 0
+		if m.TokenEnc != "" && len(key) >= 32 {
+			if dec, err := DecryptToken(key, m.TokenEnc); err == nil {
+				m.AgentToken = dec
+			}
+		}
 		ms = append(ms, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -841,7 +962,7 @@ func (s *Store) markPresenceOnline(groupID int64, ms []Member, nowMs int64) {
 // routing sees a bot that just polled the room even before the batched
 // last_seen_at write lands.
 func (s *Store) loadMembersLive(ctx context.Context, q querier, groupID, nowMs int64) ([]Member, error) {
-	ms, err := loadMembers(ctx, q, groupID)
+	ms, err := loadMembers(ctx, q, groupID, s.key())
 	if err != nil {
 		return nil, err
 	}
@@ -850,14 +971,15 @@ func (s *Store) loadMembersLive(ctx context.Context, q querier, groupID, nowMs i
 }
 
 // loadMemberByToken returns nil (not an error) for an unknown token.
-func loadMemberByToken(ctx context.Context, q querier, token string) (*Member, error) {
+func loadMemberByToken(ctx context.Context, q querier, token string, key []byte) (*Member, error) {
 	var m Member
 	var isMock int
+	h := HashToken(token)
 	err := q.QueryRowContext(ctx,
-		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, last_seen_at
-		 FROM bot_members WHERE agent_token = ?`, token).
+		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, token_hash, token_enc, last_seen_at
+		 FROM bot_members WHERE token_hash = ? OR agent_token = ?`, h, token).
 		Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
-			&isMock, &m.AgentToken, &m.LastSeenAt)
+			&isMock, &m.AgentToken, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -865,6 +987,11 @@ func loadMemberByToken(ctx context.Context, q querier, token string) (*Member, e
 		return nil, err
 	}
 	m.IsMock = isMock != 0
+	if m.TokenEnc != "" && len(key) >= 32 {
+		if dec, err := DecryptToken(key, m.TokenEnc); err == nil {
+			m.AgentToken = dec
+		}
+	}
 	return &m, nil
 }
 
@@ -1008,7 +1135,7 @@ func insertMessage(ctx context.Context, q querier, m *Message) (int64, error) {
 	return res.LastInsertId()
 }
 
-func insertMember(ctx context.Context, q querier, m *Member) error {
+func insertMember(ctx context.Context, q querier, m *Member, plainToken string, key []byte) error {
 	type execer interface {
 		ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	}
@@ -1020,9 +1147,17 @@ func insertMember(ctx context.Context, q querier, m *Member) error {
 	if m.IsMock {
 		isMock = 1
 	}
-	_, err := ex.ExecContext(ctx,
-		`INSERT INTO bot_members (group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.GroupID, m.BotID, m.Name, m.RoleTitle, m.AccentColor, isMock, m.AgentToken, m.LastSeenAt)
+	h := HashToken(plainToken)
+	enc, err := EncryptToken(key, plainToken)
+	if err != nil {
+		return err
+	}
+	m.TokenHash = h
+	m.TokenEnc = enc
+	m.AgentToken = plainToken
+	_, err = ex.ExecContext(ctx,
+		`INSERT INTO bot_members (group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, token_hash, token_enc, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
+		m.GroupID, m.BotID, m.Name, m.RoleTitle, m.AccentColor, isMock, h, enc, m.LastSeenAt)
 	return err
 }

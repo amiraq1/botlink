@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -22,6 +23,13 @@ func (s *Server) handleGroupEvents(w http.ResponseWriter, r *http.Request) {
 // stream carries only the group id: no tokens, no message content.
 func (s *Server) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
+	ip := s.clientIP(r)
+	now := time.Now()
+	if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
+		return
+	}
 	if !s.roomRateOK(w, r, token, false) {
 		return
 	}
@@ -31,6 +39,7 @@ func (s *Server) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		s.badTokenLimiter.hit(ip, now)
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}

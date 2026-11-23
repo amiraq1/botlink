@@ -57,7 +57,7 @@ func dueMockSpeaker(ctx context.Context, q querier, groupID, nowMs int64) (*Grou
 	if g.Status != "running" || g.CurrentTurnBotID == nil {
 		return nil, nil, nil
 	}
-	ms, err := loadMembers(ctx, q, groupID)
+	ms, err := loadMembersLite(ctx, q, groupID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -191,8 +191,9 @@ func (s *Store) RunningGroupIDs(ctx context.Context) ([]int64, error) {
 // loading any member fields (and never returning the token itself).
 func (s *Store) RoomGroupForToken(ctx context.Context, token string) (int64, bool, error) {
 	var groupID int64
+	h := HashToken(token)
 	err := s.ro.QueryRowContext(ctx,
-		"SELECT group_id FROM bot_members WHERE agent_token = ?", token).Scan(&groupID)
+		"SELECT group_id FROM bot_members WHERE token_hash = ? OR agent_token = ?", h, token).Scan(&groupID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}

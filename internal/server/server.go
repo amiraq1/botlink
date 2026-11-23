@@ -13,9 +13,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,6 +63,7 @@ type Server struct {
 	roomGETLimiter  *windowLimiter
 	roomPOSTLimiter *windowLimiter
 	roomIPLimiter   *windowLimiter
+	badTokenLimiter *windowLimiter
 
 	broker       *eventBroker
 	sched        *turnScheduler
@@ -92,6 +95,7 @@ func New(cfg Config, st *store.Store) *Server {
 		roomGETLimiter:     newWindowLimiter(60, time.Minute, 8192),
 		roomPOSTLimiter:    newWindowLimiter(10, time.Minute, 8192),
 		roomIPLimiter:      newWindowLimiter(180, time.Minute, 8192),
+		badTokenLimiter:    newWindowLimiter(15, time.Minute, 4096),
 	}
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
 	s.broker = newEventBroker(maxEventSubscribers, maxEventSubscribersPerGroup)
@@ -193,6 +197,42 @@ func (s *Server) groupID(r *http.Request) (int64, bool) {
 	return id, true
 }
 
+var tokenHexRegex = regexp.MustCompile(`\b[0-9a-fA-F]{32,64}\b`)
+
+func redactLog(msg string) string {
+	return tokenHexRegex.ReplaceAllString(msg, "[REDACTED]")
+}
+
+func redactPath(p string) string {
+	if strings.HasPrefix(p, "/api/room/") {
+		parts := strings.Split(p, "/")
+		if len(parts) >= 4 && parts[3] != "" {
+			parts[3] = "[REDACTED]"
+			return strings.Join(parts, "/")
+		}
+	}
+	if strings.HasPrefix(p, "/a/") {
+		parts := strings.Split(p, "/")
+		if len(parts) >= 3 && parts[2] != "" {
+			parts[2] = "[REDACTED]"
+			return strings.Join(parts, "/")
+		}
+	}
+	return p
+}
+
+func checkCSRF(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if u, err := url.Parse(origin); err == nil && u.Host != "" && !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) handleStoreErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -200,7 +240,7 @@ func (s *Server) handleStoreErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrValidation):
 		writeError(w, http.StatusBadRequest, strings.TrimPrefix(err.Error(), "validation error: "))
 	default:
-		s.log.Printf("store error: %v", err)
+		s.log.Printf("store error: %v", redactLog(err.Error()))
 		writeError(w, http.StatusInternalServerError, "internal error")
 	}
 }
@@ -222,6 +262,15 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Vary", "Cookie")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if !checkCSRF(r) {
+				writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+				return
+			}
+		}
 		if !s.isAuthenticated(r) {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
@@ -293,6 +342,9 @@ func (s *Server) loginAllowed(ip string, now time.Time) bool {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Vary", "Cookie")
 	if s.adminPassword == "" {
 		writeError(w, http.StatusServiceUnavailable, "admin login is not configured: set ADMIN_PASSWORD")
 		return
@@ -327,6 +379,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Vary", "Cookie")
+	if !checkCSRF(r) {
+		writeError(w, http.StatusForbidden, "cross-origin request forbidden")
+		return
+	}
 	if c, err := r.Cookie(sessionCookieName); err == nil {
 		if id, ok := verifySessionToken(s.sessionSecret, c.Value, time.Now()); ok {
 			_ = s.store.RevokeAdminSession(r.Context(), id, nowMs())
@@ -337,6 +396,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Vary", "Cookie")
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": s.isAuthenticated(r)})
 }
 
@@ -345,16 +407,26 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
-	if !s.roomRateOK(w, r, r.PathValue("token"), false) {
+	token := r.PathValue("token")
+	ip := s.clientIP(r)
+	now := time.Now()
+	if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
 		return
 	}
-	state, err := s.store.GetRoomState(r.Context(), r.PathValue("token"), nowMs())
+	if !s.roomRateOK(w, r, token, false) {
+		return
+	}
+	state, err := s.store.GetRoomState(r.Context(), token, nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
 	if state == nil {
+		s.badTokenLimiter.hit(ip, now)
 		// Unknown token: JSON null, mirroring the old ?RoomState.
+		w.Header().Set("Cache-Control", "private, no-cache")
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("null"))
@@ -381,7 +453,15 @@ func roomETagSeed(state *store.RoomState) string {
 }
 
 func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
-	if !s.roomRateOK(w, r, r.PathValue("token"), true) {
+	token := r.PathValue("token")
+	ip := s.clientIP(r)
+	now := time.Now()
+	if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+		writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
+		return
+	}
+	if !s.roomRateOK(w, r, token, true) {
 		return
 	}
 	var body struct {
@@ -391,11 +471,15 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	accepted, err := s.store.SubmitBotReply(r.Context(), r.PathValue("token"), body.ExpectedTurnSeq, body.Content, nowMs())
+	accepted, err := s.store.SubmitBotReply(r.Context(), token, body.ExpectedTurnSeq, body.Content, nowMs())
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			s.badTokenLimiter.hit(ip, now)
+		}
 		s.handleStoreErr(w, err)
 		return
 	}
+	w.Header().Set("Cache-Control", "private, no-cache")
 	// Stale/duplicate submits return {accepted:false} with HTTP 200, never an error.
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": accepted})
 }

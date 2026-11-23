@@ -42,7 +42,9 @@ func writeJSONConditional(w http.ResponseWriter, r *http.Request, seed string, v
 	etag := weakETag(seed)
 	h := w.Header()
 	h.Set("ETag", etag)
-	h.Set("Cache-Control", "private, no-cache")
+	if h.Get("Cache-Control") == "" {
+		h.Set("Cache-Control", "private, no-cache")
+	}
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return

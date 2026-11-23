@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"log"
 	"net"
@@ -37,7 +38,7 @@ func main() {
 	secretStr := os.Getenv("SESSION_SECRET")
 	ephemeral := false
 	var secret []byte
-	production := os.Getenv("FLY_APP_NAME") != "" || os.Getenv("APP_ENV") == "production"
+	production := os.Getenv("FLY_APP_NAME") != "" || os.Getenv("APP_ENV") == "production" || os.Getenv("RAILWAY_ENVIRONMENT") != ""
 	if secretStr == "" {
 		generated, err := server.GenerateEphemeralSecret()
 		if err != nil {
@@ -54,6 +55,26 @@ func main() {
 			logger.Fatal("SESSION_SECRET must be at least 32 characters in production")
 		}
 		secret = []byte(secretStr)
+	}
+
+	tokenKeyStr := os.Getenv("TOKEN_ENCRYPTION_KEY")
+	var tokenKey []byte
+	if tokenKeyStr == "" {
+		if production {
+			logger.Fatal("TOKEN_ENCRYPTION_KEY is required in production (at least 32 characters)")
+		}
+		if len(secret) >= 32 {
+			tokenKey = secret[:32]
+		} else {
+			h := sha256.Sum256(secret)
+			tokenKey = h[:]
+		}
+		logger.Println("WARNING: TOKEN_ENCRYPTION_KEY is not set — deriving encryption key for development. Set TOKEN_ENCRYPTION_KEY in production.")
+	} else {
+		if len(tokenKeyStr) < 32 {
+			logger.Fatal("TOKEN_ENCRYPTION_KEY must be at least 32 characters")
+		}
+		tokenKey = []byte(tokenKeyStr)
 	}
 	if adminPassword == "" {
 		if production {
@@ -85,7 +106,7 @@ func main() {
 		turnTimeoutSec = n
 	}
 
-	st, err := store.Open(dbPath)
+	st, err := store.Open(dbPath, tokenKey)
 	if err != nil {
 		logger.Fatalf("open database: %v", err)
 	}

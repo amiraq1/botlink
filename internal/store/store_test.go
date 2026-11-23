@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -438,7 +440,7 @@ func TestPresenceWritesAreCoalesced(t *testing.T) {
 	}
 	var seen int64
 	if err := st.ro.QueryRowContext(context.Background(),
-		"SELECT last_seen_at FROM bot_members WHERE agent_token = ?", token).Scan(&seen); err != nil {
+		"SELECT last_seen_at FROM bot_members WHERE token_hash = ? OR agent_token = ?", HashToken(token), token).Scan(&seen); err != nil {
 		t.Fatal(err)
 	}
 	if seen != now+1000 {
@@ -451,7 +453,7 @@ func TestPresenceWritesAreCoalesced(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.ro.QueryRowContext(context.Background(),
-		"SELECT last_seen_at FROM bot_members WHERE agent_token = ?", token).Scan(&seen); err != nil {
+		"SELECT last_seen_at FROM bot_members WHERE token_hash = ? OR agent_token = ?", HashToken(token), token).Scan(&seen); err != nil {
 		t.Fatal(err)
 	}
 	if seen != now+31_000 {
@@ -579,5 +581,117 @@ func createTestGroupInput() CreateGroupInput {
 	return CreateGroupInput{
 		Name: "G", TurnMode: "auto_round_robin", MaxTurns: 20,
 		Members: []MemberInput{{Name: "A"}, {Name: "B"}},
+	}
+}
+
+func TestTokenMigration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw db: %v", err)
+	}
+	_, err = rawDB.Exec(`
+CREATE TABLE groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  topic TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  turn_mode TEXT NOT NULL DEFAULT 'auto_round_robin',
+  turn_seq INTEGER NOT NULL DEFAULT 1,
+  max_turns INTEGER NOT NULL DEFAULT 20,
+  current_turn_bot_id TEXT DEFAULT '',
+  turn_queue TEXT NOT NULL DEFAULT '[]',
+  mock_delay_sec INTEGER NOT NULL DEFAULT 12,
+  turn_started_at INTEGER NOT NULL DEFAULT 0,
+  skip_streak INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE bot_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  role_title TEXT NOT NULL DEFAULT '',
+  accent_color TEXT NOT NULL DEFAULT '',
+  is_mock INTEGER NOT NULL DEFAULT 0,
+  agent_token TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, bot_id)
+);
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  turn_seq INTEGER,
+  sender_bot_id TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  sender_color TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'bot',
+  content TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE admin_sessions (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+INSERT INTO groups (id, name, status, turn_seq, max_turns, current_turn_bot_id)
+VALUES (1, 'Legacy Group', 'active', 1, 10, 'bot_1');
+INSERT INTO bot_members (group_id, bot_id, name, agent_token)
+VALUES (1, 'bot_1', 'Legacy Bot', 'legacy-plain-token-xyz-12345');
+`)
+	if err != nil {
+		rawDB.Close()
+		t.Fatalf("setup legacy schema: %v", err)
+	}
+	rawDB.Close()
+
+	testKey := []byte("01234567890123456789012345678901")
+	st, err := Open(dbPath, testKey)
+	if err != nil {
+		t.Fatalf("Open with migration: %v", err)
+	}
+	defer st.Close()
+
+	bakPath := dbPath + ".bak"
+	if _, err := os.Stat(bakPath); err != nil {
+		t.Errorf("expected backup file %s to exist: %v", bakPath, err)
+	}
+
+	var agentToken, tokenHash, tokenEnc string
+	row := st.db.QueryRow("SELECT agent_token, token_hash, token_enc FROM bot_members WHERE group_id = 1 AND bot_id = 'bot_1'")
+	if err := row.Scan(&agentToken, &tokenHash, &tokenEnc); err != nil {
+		t.Fatalf("scan member row: %v", err)
+	}
+	if agentToken != "" {
+		t.Errorf("agent_token should be cleared, got %q", agentToken)
+	}
+	expectedHash := HashToken("legacy-plain-token-xyz-12345")
+	if tokenHash != expectedHash {
+		t.Errorf("token_hash = %q; want %q", tokenHash, expectedHash)
+	}
+	if tokenEnc == "" {
+		t.Errorf("token_enc is empty")
+	}
+
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	roomState, err := st.GetRoomState(ctx, "legacy-plain-token-xyz-12345", now)
+	if err != nil {
+		t.Fatalf("GetRoomState with legacy token: %v", err)
+	}
+	if roomState == nil || roomState.BotName != "Legacy Bot" {
+		t.Fatalf("unexpected room state: %+v", roomState)
+	}
+
+	detail, err := st.GetGroupDetail(ctx, 1, now)
+	if err != nil {
+		t.Fatalf("GetGroupDetail: %v", err)
+	}
+	if len(detail.Members) != 1 || detail.Members[0].AgentToken != "legacy-plain-token-xyz-12345" {
+		t.Fatalf("GetGroupDetail member token = %q; want legacy-plain-token-xyz-12345", detail.Members[0].AgentToken)
 	}
 }
