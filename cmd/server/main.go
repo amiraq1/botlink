@@ -104,6 +104,8 @@ func main() {
 		trustedProxies = server.ParseCIDRs(strings.Split(raw, ","))
 	}
 
+	cookieSecure := os.Getenv("COOKIE_SECURE") == "1"
+
 	srv := server.New(server.Config{
 		Addr:                   ":" + port,
 		DBPath:                 dbPath,
@@ -117,6 +119,7 @@ func main() {
 		TrustHeaderAlways:      trustAlways,
 		TurnTimeoutSec:         turnTimeoutSec,
 		Production:             production,
+		CookieSecure:           cookieSecure,
 	}, st)
 	st.SetTurnTimeout(turnTimeoutSec)
 

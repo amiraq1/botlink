@@ -211,6 +211,11 @@ func decodeJSONLimited(w http.ResponseWriter, r *http.Request, dst any, maxBytes
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return false
 	}

@@ -1322,8 +1322,8 @@ func TestRoomPayloadCapAndLazyBodyReading(t *testing.T) {
 	recValidTooBig := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recValidTooBig, reqValidTooBig)
 
-	if recValidTooBig.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 Bad Request for payload > 64KB, got: %d (body: %s)", recValidTooBig.Code, recValidTooBig.Body.String())
+	if recValidTooBig.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 Request Entity Too Large for payload > 64KB, got: %d (body: %s)", recValidTooBig.Code, recValidTooBig.Body.String())
 	}
 }
 

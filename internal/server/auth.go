@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -70,7 +69,7 @@ func verifySessionToken(secret []byte, token string, now time.Time) (string, boo
 // unconditional (even when behind internal TLS-terminating proxies on plain HTTP).
 // In development, it respects local TLS or trusted proxy X-Forwarded-Proto headers.
 func (s *Server) secureRequest(r *http.Request) bool {
-	if s.production || s.cookieSecure || os.Getenv("COOKIE_SECURE") == "1" {
+	if s.production || s.cookieSecure {
 		return true
 	}
 	if r.TLS != nil {

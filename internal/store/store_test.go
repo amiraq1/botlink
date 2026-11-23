@@ -1016,4 +1016,3 @@ END;
 		t.Fatalf("expected backup file %s to be kept on migration failure, got err: %v", bakPath, err)
 	}
 }
-
