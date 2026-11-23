@@ -13,9 +13,11 @@ import (
 	"github.com/amiraq1/botlink/internal/store"
 )
 
+var benchEncryptionKey = []byte("0123456789abcdef0123456789abcdef")
+
 func openBenchStore(b *testing.B) *store.Store {
 	b.Helper()
-	st, err := store.Open(filepath.Join(b.TempDir(), "bench.db"))
+	st, err := store.Open(filepath.Join(b.TempDir(), "bench.db"), benchEncryptionKey)
 	if err != nil {
 		b.Fatalf("Open: %v", err)
 	}

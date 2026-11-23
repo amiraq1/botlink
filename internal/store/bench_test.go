@@ -8,9 +8,11 @@ import (
 	"time"
 )
 
+var benchEncryptionKey = []byte("0123456789abcdef0123456789abcdef")
+
 func openBenchStore(b *testing.B) *Store {
 	b.Helper()
-	st, err := Open(filepath.Join(b.TempDir(), "bench.db"))
+	st, err := Open(filepath.Join(b.TempDir(), "bench.db"), benchEncryptionKey)
 	if err != nil {
 		b.Fatalf("Open: %v", err)
 	}

@@ -14,9 +14,11 @@ import (
 	"time"
 )
 
+var testEncryptionKey = []byte("0123456789abcdef0123456789abcdef")
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"), testEncryptionKey)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -847,6 +849,139 @@ VALUES (1, 1, 'bot_1', 'Bot 1', 'first message', 1000);
 	_, err = st.db.Exec("INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, content, created_at) VALUES (1, NULL, 'bot_1', 'Bot 1', 'system message 2', 4000)")
 	if err != nil {
 		t.Fatalf("insert NULL turn_seq 2 failed: %v", err)
+	}
+}
+
+func TestMigration2CleansDuplicateSystemTurnSeq(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "migration_dup_turn.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+
+	_, err = rawDB.Exec(`
+CREATE TABLE schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at INTEGER NOT NULL
+);
+INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, '001_initial_tables', 1000);
+
+CREATE TABLE groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  topic TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'waiting_for_leader',
+  turn_mode TEXT NOT NULL DEFAULT 'auto_round_robin',
+  max_turns INTEGER NOT NULL DEFAULT 20,
+  turn_seq INTEGER NOT NULL DEFAULT 1,
+  current_turn_bot_id TEXT,
+  turn_queue TEXT NOT NULL DEFAULT '[]',
+  mock_delay_sec INTEGER NOT NULL DEFAULT 12,
+  turn_started_at INTEGER NOT NULL DEFAULT 0,
+  skip_streak INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE bot_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  role_title TEXT NOT NULL DEFAULT '',
+  accent_color TEXT NOT NULL DEFAULT '',
+  is_mock INTEGER NOT NULL DEFAULT 0,
+  agent_token TEXT NOT NULL DEFAULT '',
+  token_hash TEXT NOT NULL DEFAULT '',
+  token_enc TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, bot_id)
+);
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  turn_seq INTEGER,
+  sender_bot_id TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  sender_color TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'bot',
+  content TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE admin_sessions (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL DEFAULT 0,
+  revoked_at INTEGER
+);
+
+INSERT INTO groups (id, name, status, turn_seq, max_turns) VALUES (5, 'Live Group', 'paused', 10, 100);
+INSERT INTO bot_members (group_id, bot_id, name, token_hash) VALUES (5, 'bot_1', 'Muse', 'h1');
+INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at)
+VALUES (5, 10, 'system', 'النظام', '#6B7280', 'bot', 'إيقاف تلقائي', 1000);
+INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at)
+VALUES (5, 10, 'bot_1', 'Muse', '#3B82F6', 'bot', 'reply on same turn', 1001);
+`)
+	if err != nil {
+		rawDB.Close()
+		t.Fatalf("setup v1 schema: %v", err)
+	}
+	rawDB.Close()
+
+	st, err := Open(dbPath, testEncryptionKey)
+	if err != nil {
+		t.Fatalf("Open with duplicate system turn_seq should succeed after migration 2 cleanup: %v", err)
+	}
+	defer st.Close()
+
+	var v2Count int
+	if err := st.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = 2").Scan(&v2Count); err != nil {
+		t.Fatalf("query schema_migrations v2: %v", err)
+	}
+	if v2Count != 1 {
+		t.Fatalf("expected migration 2 applied, got count=%d", v2Count)
+	}
+
+	var systemTurnSeq sql.NullInt64
+	if err := st.db.QueryRow("SELECT turn_seq FROM messages WHERE sender_bot_id = 'system' AND group_id = 5").Scan(&systemTurnSeq); err != nil {
+		t.Fatalf("query system message: %v", err)
+	}
+	if systemTurnSeq.Valid {
+		t.Fatalf("system message turn_seq should be NULL after migration, got %d", systemTurnSeq.Int64)
+	}
+
+	var botTurnSeq sql.NullInt64
+	if err := st.db.QueryRow("SELECT turn_seq FROM messages WHERE sender_bot_id = 'bot_1' AND group_id = 5").Scan(&botTurnSeq); err != nil {
+		t.Fatalf("query bot message: %v", err)
+	}
+	if !botTurnSeq.Valid || botTurnSeq.Int64 != 10 {
+		t.Fatalf("bot message turn_seq = valid:%v value:%d; want 10", botTurnSeq.Valid, botTurnSeq.Int64)
+	}
+
+	var dupCount int
+	if err := st.db.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT group_id, turn_seq FROM messages WHERE turn_seq IS NOT NULL
+			GROUP BY group_id, turn_seq HAVING COUNT(*) > 1
+		)
+	`).Scan(&dupCount); err != nil {
+		t.Fatalf("query duplicate turn_seq: %v", err)
+	}
+	if dupCount != 0 {
+		t.Fatalf("expected no duplicate (group_id, turn_seq) rows, got %d", dupCount)
+	}
+
+	// Future system messages must not conflict with bot turn_seq values.
+	if _, err := st.db.Exec(`INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at)
+		VALUES (5, NULL, 'system', 'النظام', '#6B7280', 'bot', 'future system', 2000)`); err != nil {
+		t.Fatalf("insert future NULL-turn system message: %v", err)
+	}
+	if _, err := st.db.Exec(`INSERT INTO messages (group_id, turn_seq, sender_bot_id, sender_name, sender_color, role, content, created_at)
+		VALUES (5, 11, 'bot_1', 'Muse', '#3B82F6', 'bot', 'future bot', 2001)`); err != nil {
+		t.Fatalf("insert future bot turn message: %v", err)
 	}
 }
 

@@ -246,9 +246,8 @@ func (s *Store) processExpiredTurnTx(ctx context.Context, conn *sql.Conn, groupI
 		return nil
 	}
 
-	// CAS: re-read happens under the write lock above; capture the
-	// values so a late reply with the old turnSeq can no longer win.
-	seq := g.TurnSeq
+	// CAS: re-read happens under the write lock above; late replies with
+	// the old turnSeq are rejected by SubmitBotReply's turnSeq check.
 	g.SkipStreak++
 	if g.SkipStreak >= int64(len(ms)) {
 		g.Status = "paused"
@@ -264,7 +263,7 @@ func (s *Store) processExpiredTurnTx(ctx context.Context, conn *sql.Conn, groupI
 		}
 		event := "إيقاف تلقائي: لم يرد أي عضو بعد انتهاء مهلات متتالية. الأعضاء: " + names.String()
 		if _, err := insertMessage(ctx, conn, &Message{
-			GroupID: groupID, TurnSeq: &seq, SenderBotID: "system",
+			GroupID: groupID, TurnSeq: nil, SenderBotID: "system",
 			SenderName: "النظام", SenderColor: "#6B7280", Role: "bot",
 			Content: event, CreatedAt: nowMs,
 		}); err != nil {

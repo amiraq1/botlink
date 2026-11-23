@@ -16,9 +16,11 @@ import (
 	"github.com/amiraq1/botlink/internal/store"
 )
 
+var testEncryptionKey = []byte("0123456789abcdef0123456789abcdef")
+
 func openTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), testEncryptionKey)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

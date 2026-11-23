@@ -18,7 +18,7 @@ All configuration is driven by environment variables. The server validates requi
 | `TOKEN_ENCRYPTION_KEY` | **Yes (Prod)** | `""` | 32-byte (or $\ge 32$ char) key for AES-256-GCM encryption of agent tokens at rest. |
 | `BOTLINK_DEV` | No | `0` | Set to `1` strictly in local development to derive an encryption key via HKDF. **Fails startup if enabled in production**. |
 | `CLIENT_IP_HEADER` | Recommended | `""` | Upstream edge proxy header providing real client IP (e.g. `X-Real-IP` on Railway). |
-| `TRUSTED_PROXIES` | No | RFC 1918 / Loopback | Comma-separated CIDR list for trusted upstream reverse proxies. |
+| `TRUSTED_PROXIES` | No | Loopback only (`127.0.0.1/32`, `::1/128`) | Comma-separated CIDR list for trusted upstream reverse proxies. |
 | `TRUSTED_PROXY_HEADER` | No | `""` | Proxy header used with CIDR matching (e.g. `X-Forwarded-For`). Auto-set to `Fly-Client-IP` on Fly.io. |
 | `MAX_TURNS_LIMIT` | No | `500` | Upper limit for group conversation turns. |
 | `MESSAGE_RETENTION` | No | `2000` | Maximum messages retained per group. Older messages are pruned automatically. |
@@ -77,11 +77,14 @@ sqlite3 /tmp/botlink_dryrun.db "SELECT version, name, datetime(applied_at/1000, 
 # Verify unique turn constraint index exists
 sqlite3 /tmp/botlink_dryrun.db "SELECT name, sql FROM sqlite_master WHERE type='index' AND name='idx_messages_group_turn';"
 
-# Verify zero plaintext tokens remain in database
-sqlite3 /tmp/botlink_dryrun.db "SELECT count(*) FROM bot_members WHERE agent_token != '';"
+# Verify legacy agent_token column was dropped by migration 3
+sqlite3 /tmp/botlink_dryrun.db "SELECT count(*) FROM pragma_table_info('bot_members') WHERE name='agent_token';"
 
 # Verify all members have encrypted tokens and hashes
 sqlite3 /tmp/botlink_dryrun.db "SELECT count(*) FROM bot_members WHERE token_hash = '' OR token_enc = '';"
+
+# Verify no duplicate (group_id, turn_seq) rows remain
+sqlite3 /tmp/botlink_dryrun.db "SELECT group_id, turn_seq, COUNT(*) c FROM messages WHERE turn_seq IS NOT NULL GROUP BY group_id, turn_seq HAVING c > 1;"
 ```
 
 ### Step 4: Discard Dry-Run Database
@@ -120,14 +123,14 @@ When `SIGTERM` is received, the server executes clean teardown within ~1–2 sec
 1. **SSE Teardown**: `srv.Close()` cancels `streamCtx` and terminates all active Server-Sent Events subscribers. Client browsers receive a clean stream termination and will automatically attempt reconnection via `retry: 3000`.
 2. **HTTP Server Drain**: `httpServer.Shutdown(shutdownCtx)` with a 5-second timeout rejects new connections while allowing in-flight API requests to complete.
 3. **Presence Queue Flush**: `st.FlushPresence(ctx)` commits any buffered in-memory presence timestamps to SQLite.
-4. **Clean SQLite Close**: Reader pool and writer connection close cleanly, flushing and checkpointing the WAL file (`PRAGMA wal_checkpoint(TRUNCATE)`).
+4. **Clean SQLite Close**: The read pool and writer connection close cleanly. Closing the final SQLite connection checkpoints the WAL automatically; the code does not issue an explicit `PRAGMA wal_checkpoint(TRUNCATE)` during shutdown.
 
 ---
 
 ## 5. Backup & Disaster Recovery
 
 ### Why Local Volume Backups Are Not Enough
-The automated periodic backups created in `botlink-backup-*.db` on the local volume (`/data`) protect against logical errors (accidental deletion, faulty updates, or bad migrations).
+The `Store.Backup()` API can create atomic `botlink-backup-*.db` snapshots on a local volume (e.g. `/data`), but **the application does not currently schedule periodic backups automatically**. Operators must run backups explicitly (cron/sidecar) and should treat local snapshots only as protection against logical errors (accidental deletion, faulty updates, or bad migrations).
 However, **local backups do not protect against volume loss, platform deletion, disk failure, or provider outage**. If the persistent volume is lost, all local backups stored on it are lost as well.
 
 ### Offsite Encrypted Backup Strategy

@@ -7,7 +7,6 @@ package store
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -257,11 +256,7 @@ func (s *Store) SetEncryptionKey(key []byte) {
 }
 
 func (s *Store) key() []byte {
-	if len(s.encryptionKey) >= 32 {
-		return s.encryptionKey
-	}
-	defaultKey := sha256.Sum256([]byte("botlink-default-encryption-key-for-dev"))
-	return defaultKey[:]
+	return s.encryptionKey
 }
 
 const (
@@ -331,8 +326,11 @@ func Open(path string, encryptionKey ...[]byte) (*Store, error) {
 		lastPruneMs:   time.Now().UnixMilli(),
 		turnTimeoutMs: DefaultTurnTimeoutSec * 1000,
 	}
-	if len(encryptionKey) > 0 && len(encryptionKey[0]) > 0 {
+	if len(encryptionKey) > 0 && len(encryptionKey[0]) >= 32 {
 		s.SetEncryptionKey(encryptionKey[0])
+	} else {
+		db.Close()
+		return nil, errors.New("store: TOKEN_ENCRYPTION_KEY is required (at least 32 bytes)")
 	}
 	// MaxOpenConns=1 pins every PRAGMA below to the single writer conn.
 	// Read-side tuning (temp_store, cache_size, mmap) travels in the read DSN:
@@ -667,6 +665,39 @@ DROP INDEX IF EXISTS idx_members_presence;
 				if err := ensureConnColumn(ctx, conn, "bot_members", "token_enc", "TEXT NOT NULL DEFAULT ''"); err != nil {
 					return err
 				}
+				// System auto-pause messages historically shared turn_seq with the bot
+				// reply that triggered the pause. Null them out before creating the
+				// unique turn index; future system messages are inserted with NULL.
+				if _, err := conn.ExecContext(ctx,
+					`UPDATE messages SET turn_seq = NULL WHERE sender_bot_id = 'system' AND turn_seq IS NOT NULL;`); err != nil {
+					return fmt.Errorf("migration 2: clear system turn_seq: %w", err)
+				}
+				dupRows, err := conn.QueryContext(ctx,
+					`SELECT group_id, turn_seq, COUNT(*) c
+					 FROM messages
+					 WHERE turn_seq IS NOT NULL
+					 GROUP BY group_id, turn_seq
+					 HAVING c > 1`)
+				if err != nil {
+					return fmt.Errorf("migration 2: check duplicate turn_seq: %w", err)
+				}
+				var conflicts []string
+				for dupRows.Next() {
+					var groupID, turnSeq, count int64
+					if err := dupRows.Scan(&groupID, &turnSeq, &count); err != nil {
+						dupRows.Close()
+						return fmt.Errorf("migration 2: scan duplicate turn_seq: %w", err)
+					}
+					conflicts = append(conflicts, fmt.Sprintf("group=%d turn_seq=%d count=%d", groupID, turnSeq, count))
+				}
+				if err := dupRows.Err(); err != nil {
+					dupRows.Close()
+					return fmt.Errorf("migration 2: iterate duplicate turn_seq: %w", err)
+				}
+				dupRows.Close()
+				if len(conflicts) > 0 {
+					return fmt.Errorf("migration 2: duplicate (group_id, turn_seq) rows remain; resolve before creating idx_messages_group_turn: %s", strings.Join(conflicts, "; "))
+				}
 				if _, err := conn.ExecContext(ctx,
 					`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_group_turn ON messages(group_id, turn_seq) WHERE turn_seq IS NOT NULL;`); err != nil {
 					return err
@@ -686,9 +717,17 @@ DROP INDEX IF EXISTS idx_members_presence;
 				if err != nil {
 					return err
 				}
-				if hasCol {
-					if _, err := conn.ExecContext(ctx, "ALTER TABLE bot_members DROP COLUMN agent_token;"); err != nil {
+				if !hasCol {
+					return nil
+				}
+				if _, err := conn.ExecContext(ctx, "ALTER TABLE bot_members DROP COLUMN agent_token;"); err != nil {
+					// Legacy schemas may declare agent_token as UNIQUE; SQLite cannot
+					// DROP COLUMN on UNIQUE-constrained columns. Rebuild the table.
+					if !strings.Contains(err.Error(), "cannot drop UNIQUE column") {
 						return err
+					}
+					if err := rebuildBotMembersWithoutAgentToken(ctx, conn); err != nil {
+						return fmt.Errorf("migration 3: rebuild bot_members without agent_token: %w", err)
 					}
 				}
 				return nil
@@ -819,6 +858,43 @@ func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef st
 	return nil
 }
 
+func rebuildBotMembersWithoutAgentToken(ctx context.Context, conn *sql.Conn) error {
+	if _, err := conn.ExecContext(ctx, `ALTER TABLE bot_members RENAME TO bot_members_old;`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `
+CREATE TABLE bot_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  role_title TEXT NOT NULL DEFAULT '',
+  accent_color TEXT NOT NULL DEFAULT '',
+  is_mock INTEGER NOT NULL DEFAULT 0,
+  token_hash TEXT NOT NULL DEFAULT '',
+  token_enc TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, bot_id)
+);`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO bot_members (group_id, bot_id, name, role_title, accent_color, is_mock, token_hash, token_enc, last_seen_at)
+SELECT group_id, bot_id, name, role_title, accent_color, is_mock, token_hash, token_enc, last_seen_at
+FROM bot_members_old;`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `DROP TABLE bot_members_old;`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_members_group_mock ON bot_members(group_id, is_mock);`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_members_token_hash ON bot_members(token_hash);`); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) ensureColumn(ctx context.Context, table, col, colDef string) error {
 	rows, err := ctxQuery(ctx, s.db, "PRAGMA table_info("+table+")")
 	if err != nil {
@@ -924,9 +1000,13 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("encrypt token for group %d bot %s: %w", u.groupID, u.botID, err)
 			}
+			// Legacy schemas declare agent_token as UNIQUE NOT NULL. Overwriting with
+			// a per-row sentinel avoids UNIQUE collisions while secure_delete+VACUUM
+			// purge the original plaintext bytes. Migration 3 drops the column.
+			sentinel := fmt.Sprintf("migrated-%d-%s", u.groupID, u.botID)
 			if _, err := conn.ExecContext(ctx,
-				"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = '' WHERE group_id = ? AND bot_id = ?",
-				h, enc, u.groupID, u.botID); err != nil {
+				"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = ? WHERE group_id = ? AND bot_id = ?",
+				h, enc, sentinel, u.groupID, u.botID); err != nil {
 				return err
 			}
 		}
@@ -938,7 +1018,7 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 
 	var remaining int
 	if err := s.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM bot_members WHERE agent_token != ''").Scan(&remaining); err != nil {
+		"SELECT COUNT(*) FROM bot_members WHERE agent_token != '' AND agent_token NOT LIKE 'migrated-%'").Scan(&remaining); err != nil {
 		return err
 	}
 	if remaining != 0 {
