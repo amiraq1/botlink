@@ -626,7 +626,7 @@ func (s *Store) AddMember(ctx context.Context, groupID int64, in MemberInput, no
 		var exists int
 		h := HashToken(token)
 		if err := conn.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM bot_members WHERE token_hash = ? OR agent_token = ?", h, token).Scan(&exists); err != nil {
+			"SELECT COUNT(*) FROM bot_members WHERE token_hash = ?", h).Scan(&exists); err != nil {
 			return err
 		}
 		if exists > 0 {
@@ -748,7 +748,7 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 			return wrapErr(ErrValidation, "Cannot rotate token on a "+g.Status+" group")
 		}
 		res, err := conn.ExecContext(ctx,
-			"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = '' WHERE group_id = ? AND bot_id = ?",
+			"UPDATE bot_members SET token_hash = ?, token_enc = ? WHERE group_id = ? AND bot_id = ?",
 			h, enc, groupID, botID)
 		if err != nil {
 			return err
@@ -839,7 +839,7 @@ func (s *Store) SubmitBotReply(ctx context.Context, token string, expectedTurnSe
 		}
 		h := HashToken(token)
 		_, _ = conn.ExecContext(ctx,
-			"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ? OR agent_token = ?", nowMs, h, token)
+			"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ?", nowMs, h)
 		g, err := loadGroup(ctx, conn, m.GroupID)
 		if err != nil {
 			return err

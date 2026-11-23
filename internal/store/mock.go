@@ -193,7 +193,7 @@ func (s *Store) RoomGroupForToken(ctx context.Context, token string) (int64, boo
 	var groupID int64
 	h := HashToken(token)
 	err := s.ro.QueryRowContext(ctx,
-		"SELECT group_id FROM bot_members WHERE token_hash = ? OR agent_token = ?", h, token).Scan(&groupID)
+		"SELECT group_id FROM bot_members WHERE token_hash = ?", h).Scan(&groupID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}

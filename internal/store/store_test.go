@@ -441,7 +441,7 @@ func TestPresenceWritesAreCoalesced(t *testing.T) {
 	}
 	var seen int64
 	if err := st.ro.QueryRowContext(context.Background(),
-		"SELECT last_seen_at FROM bot_members WHERE token_hash = ? OR agent_token = ?", HashToken(token), token).Scan(&seen); err != nil {
+		"SELECT last_seen_at FROM bot_members WHERE token_hash = ?", HashToken(token)).Scan(&seen); err != nil {
 		t.Fatal(err)
 	}
 	if seen != now+1000 {
@@ -454,7 +454,7 @@ func TestPresenceWritesAreCoalesced(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := st.ro.QueryRowContext(context.Background(),
-		"SELECT last_seen_at FROM bot_members WHERE token_hash = ? OR agent_token = ?", HashToken(token), token).Scan(&seen); err != nil {
+		"SELECT last_seen_at FROM bot_members WHERE token_hash = ?", HashToken(token)).Scan(&seen); err != nil {
 		t.Fatal(err)
 	}
 	if seen != now+31_000 {
@@ -672,13 +672,10 @@ VALUES (1, 'bot_1', 'Legacy Bot', 'legacy-plain-token-xyz-12345');
 		}
 	}
 
-	var agentToken, tokenHash, tokenEnc string
-	row := st.db.QueryRow("SELECT agent_token, token_hash, token_enc FROM bot_members WHERE group_id = 1 AND bot_id = 'bot_1'")
-	if err := row.Scan(&agentToken, &tokenHash, &tokenEnc); err != nil {
+	var tokenHash, tokenEnc string
+	row := st.db.QueryRow("SELECT token_hash, token_enc FROM bot_members WHERE group_id = 1 AND bot_id = 'bot_1'")
+	if err := row.Scan(&tokenHash, &tokenEnc); err != nil {
 		t.Fatalf("scan member row: %v", err)
-	}
-	if agentToken != "" {
-		t.Errorf("agent_token should be cleared, got %q", agentToken)
 	}
 	expectedHash := HashToken("legacy-plain-token-xyz-12345")
 	if tokenHash != expectedHash {
@@ -686,6 +683,12 @@ VALUES (1, 'bot_1', 'Legacy Bot', 'legacy-plain-token-xyz-12345');
 	}
 	if tokenEnc == "" {
 		t.Errorf("token_enc is empty")
+	}
+
+	// Verify agent_token column was dropped
+	var dummy string
+	if err := st.db.QueryRow("SELECT agent_token FROM bot_members WHERE group_id = 1").Scan(&dummy); err == nil {
+		t.Error("expected error querying dropped column agent_token, but query succeeded")
 	}
 
 	ctx := context.Background()
@@ -800,6 +803,34 @@ VALUES (1, 1, 'bot_1', 'Bot 1', 'first message', 1000);
 	}
 	if v2Count != 1 {
 		t.Fatalf("expected version 2 in schema_migrations, got count=%d", v2Count)
+	}
+
+	// Check schema_migrations has version 3 (dropping agent_token)
+	var v3Count int
+	if err := st.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version = 3").Scan(&v3Count); err != nil {
+		t.Fatalf("query schema_migrations v3: %v", err)
+	}
+	if v3Count != 1 {
+		t.Fatalf("expected version 3 in schema_migrations, got count=%d", v3Count)
+	}
+
+	// Verify agent_token column was dropped
+	rows, err := st.db.Query("PRAGMA table_info(bot_members)")
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "agent_token" {
+			t.Fatalf("agent_token column still exists in bot_members after migration 3!")
+		}
 	}
 
 	// Verify unique index idx_messages_group_turn prevents duplicate (group_id, turn_seq)

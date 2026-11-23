@@ -223,8 +223,8 @@ func TestPresenceFlushBatches(t *testing.T) {
 	for i, botID := range []string{"bot_1", "bot_2", "bot_3"} {
 		var seen int64
 		if err := st.ro.QueryRowContext(ctx,
-			"SELECT last_seen_at FROM bot_members WHERE token_hash = ? OR agent_token = ?",
-			HashToken(tokens[botID]), tokens[botID]).Scan(&seen); err != nil {
+			"SELECT last_seen_at FROM bot_members WHERE token_hash = ?",
+			HashToken(tokens[botID])).Scan(&seen); err != nil {
 			t.Fatal(err)
 		}
 		if want := now + int64(i+1)*1000; seen != want {
@@ -238,8 +238,8 @@ func TestPresenceFlushBatches(t *testing.T) {
 	}
 	var seen int64
 	if err := st.ro.QueryRowContext(ctx,
-		"SELECT last_seen_at FROM bot_members WHERE token_hash = ? OR agent_token = ?",
-		HashToken(tokens["bot_1"]), tokens["bot_1"]).Scan(&seen); err != nil {
+		"SELECT last_seen_at FROM bot_members WHERE token_hash = ?",
+		HashToken(tokens["bot_1"])).Scan(&seen); err != nil {
 		t.Fatal(err)
 	}
 	if seen != now+1000 {

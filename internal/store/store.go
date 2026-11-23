@@ -487,14 +487,14 @@ func (s *Store) FlushPresence(ctx context.Context) error {
 	}
 	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		stmt, err := conn.PrepareContext(ctx,
-			"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ? OR agent_token = ?")
+			"UPDATE bot_members SET last_seen_at = ? WHERE token_hash = ?")
 		if err != nil {
 			return err
 		}
 		defer stmt.Close()
 		for token, at := range pending {
 			h := HashToken(token)
-			if _, err := stmt.ExecContext(ctx, at, h, token); err != nil {
+			if _, err := stmt.ExecContext(ctx, at, h); err != nil {
 				return err
 			}
 		}
@@ -560,8 +560,8 @@ func (s *Store) MemberExistsByToken(ctx context.Context, token string) (bool, er
 		db = s.ro
 	}
 	err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM bot_members WHERE token_hash = ? OR agent_token = ?",
-		h, token).Scan(&count)
+		"SELECT COUNT(*) FROM bot_members WHERE token_hash = ?",
+		h).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -623,7 +623,6 @@ CREATE TABLE IF NOT EXISTS bot_members (
   role_title TEXT NOT NULL DEFAULT '',
   accent_color TEXT NOT NULL DEFAULT '',
   is_mock INTEGER NOT NULL DEFAULT 0,
-  agent_token TEXT NOT NULL DEFAULT '',
   token_hash TEXT NOT NULL DEFAULT '',
   token_enc TEXT NOT NULL DEFAULT '',
   last_seen_at INTEGER NOT NULL DEFAULT 0,
@@ -679,6 +678,22 @@ DROP INDEX IF EXISTS idx_members_presence;
 				return nil
 			},
 		},
+		{
+			version: 3,
+			name:    "003_drop_agent_token_column",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				hasCol, err := hasConnColumn(ctx, conn, "bot_members", "agent_token")
+				if err != nil {
+					return err
+				}
+				if hasCol {
+					if _, err := conn.ExecContext(ctx, "ALTER TABLE bot_members DROP COLUMN agent_token;"); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -689,6 +704,13 @@ DROP INDEX IF EXISTS idx_members_presence;
 		}
 		if applied > 0 {
 			continue
+		}
+
+		if m.version == 3 {
+			// Encrypt any plaintext tokens before dropping the legacy agent_token column
+			if err := s.migrateUnencryptedTokens(ctx); err != nil {
+				return fmt.Errorf("pre-migration 3 token encryption: %w", err)
+			}
 		}
 
 		err = s.immediateTx(ctx, func(txCtx context.Context, conn *sql.Conn) error {
@@ -722,6 +744,48 @@ DROP INDEX IF EXISTS idx_members_presence;
 	}
 
 	return s.migrateUnencryptedTokens(ctx)
+}
+
+func hasConnColumn(ctx context.Context, conn *sql.Conn, table, col string) (bool, error) {
+	rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+func (s *Store) hasColumn(ctx context.Context, table, col string) (bool, error) {
+	rows, err := ctxQuery(ctx, s.db, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef string) error {
@@ -787,6 +851,13 @@ func (s *Store) ensureColumn(ctx context.Context, table, col, colDef string) err
 }
 
 func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
+	hasCol, err := s.hasColumn(ctx, "bot_members", "agent_token")
+	if err != nil {
+		return err
+	}
+	if !hasCol {
+		return nil
+	}
 	var count int
 	if err := s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM bot_members WHERE agent_token != '' AND token_hash = ''").Scan(&count); err != nil {
@@ -821,7 +892,7 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		return fmt.Errorf("enable secure_delete: %w", err)
 	}
 
-	err := s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	err = s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx,
 			"SELECT group_id, bot_id, agent_token FROM bot_members WHERE agent_token != '' AND token_hash = ''")
 		if err != nil {
@@ -1102,7 +1173,7 @@ func loadGroup(ctx context.Context, q querier, id int64) (*Group, error) {
 
 func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]Member, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, token_hash, token_enc, last_seen_at
+		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, token_hash, token_enc, last_seen_at
 		 FROM bot_members WHERE group_id = ?`, groupID)
 	if err != nil {
 		return nil, err
@@ -1113,7 +1184,7 @@ func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]M
 		var m Member
 		var isMock int
 		if err := rows.Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
-			&isMock, &m.AgentToken, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt); err != nil {
+			&isMock, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt); err != nil {
 			return nil, err
 		}
 		m.IsMock = isMock != 0
@@ -1204,10 +1275,10 @@ func loadMemberByToken(ctx context.Context, q querier, token string, key []byte)
 	var isMock int
 	h := HashToken(token)
 	err := q.QueryRowContext(ctx,
-		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, token_hash, token_enc, last_seen_at
-		 FROM bot_members WHERE token_hash = ? OR agent_token = ?`, h, token).
+		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, token_hash, token_enc, last_seen_at
+		 FROM bot_members WHERE token_hash = ?`, h).
 		Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
-			&isMock, &m.AgentToken, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt)
+			&isMock, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1384,8 +1455,8 @@ func insertMember(ctx context.Context, q querier, m *Member, plainToken string, 
 	m.TokenEnc = enc
 	m.AgentToken = plainToken
 	_, err = ex.ExecContext(ctx,
-		`INSERT INTO bot_members (group_id, bot_id, name, role_title, accent_color, is_mock, agent_token, token_hash, token_enc, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)`,
+		`INSERT INTO bot_members (group_id, bot_id, name, role_title, accent_color, is_mock, token_hash, token_enc, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.GroupID, m.BotID, m.Name, m.RoleTitle, m.AccentColor, isMock, h, enc, m.LastSeenAt)
 	return err
 }
