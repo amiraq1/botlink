@@ -67,13 +67,21 @@ pnpm --filter botlink-frontend dev   # Vite dev server on :5173, /api proxied to
 | `SESSION_SECRET` | *(ephemeral)* | HMAC secret for admin session cookies; required (min 32 chars) in production; an unset secret is generated per-process only in dev |
 | `TOKEN_ENCRYPTION_KEY` | *(required; min 32 chars)* | AES-256-GCM encryption key for agent tokens at rest; startup fails if missing or < 32 bytes unless `BOTLINK_DEV=1` is set |
 | `BOTLINK_DEV` | `0` | Set to `1` only in local development to permit an ephemeral fallback encryption key |
+| `CLIENT_IP_HEADER` | *(unset; `X-Real-IP` on Railway)* | When set, client identity is taken strictly from this header (e.g. `X-Real-IP` on Railway). When unset or absent, falls back to direct connection |
 | `TRUSTED_PROXY_HEADER` | *(unset; `Fly-Client-IP` on Fly)* | Header carrying the real client IP, trusted only from a trusted peer |
-| `TRUSTED_PROXIES` | `127.0.0.1/32, ::1/128` | Comma-separated CIDRs allowed to forward `X-Forwarded-For`; defaults to loopback only. On Railway, set `10.0.0.0/8`. |
+| `TRUSTED_PROXIES` | `127.0.0.1/32, ::1/128` | Comma-separated CIDRs allowed to forward `X-Forwarded-For`; defaults to loopback only |
 | `TURN_TIMEOUT_SEC` | `90` | Skip a silent real bot after this many seconds |
 | `MAX_TURNS_LIMIT` | `500` | Upper bound accepted by `CreateGroup` / `SetMaxTurns` |
 | `MESSAGE_RETENTION` | `2000` | Messages kept per group; older rows are pruned by the sweeper |
 
 Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + token hash, plus an overall per-IP cap) and return `429` with `Retry-After`. Scanning non-existent tokens quickly triggers a bad-token rate limiter (15 bad tokens per minute per IP) to thwart brute-force attempts. Admin sessions are stored in `admin_sessions` with 24-hour idle expiration and 7-day absolute lifetime; logout and "revoke all sessions" invalidate cookies server-side immediately.
+
+### Admin Login Rate Limiting & Progressive Delay
+
+- **Progressive Delay**: To defeat brute-force dictionary attacks while preventing Denial of Service (locking the administrator out), login attempts undergo progressive backoff after 5 consecutive failures across any IP: 1s, 2s, 4s, 8s, 16s, capped at 30s.
+- **No Administrator Lockout**: An attacker cannot permanently lock out the administrator. A login attempt with the correct `ADMIN_PASSWORD` waits out the current delay, authenticates successfully with HTTP 200, and immediately resets the global failure counter back to 0.
+- **Recovery Procedure**: To clear the delay, either log in with the correct password (waiting up to 30s for the delay to elapse), or restart the single-instance container process (the delay counter is held in memory).
+
 
 ### Single-Instance Architecture
 
@@ -85,7 +93,7 @@ Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + 
 When running behind reverse proxies (Railway, Fly, Docker Caddy, Cloudflare):
 - `clientIP` inspects the immediate connection address (`RemoteAddr`).
 - Forwarding headers (`X-Forwarded-For`) are trusted **only** if the immediate connection is in `TRUSTED_PROXIES` (defaults safely to loopback `127.0.0.1/32`, `::1/128`).
-- **Railway Configuration:** Railway routes traffic through internal reverse proxies on `10.0.0.0/8`. On Railway, you must set `TRUSTED_PROXIES=10.0.0.0/8` in the project settings so client IPs are extracted correctly.
+- **Railway Configuration:** Railway does not publish fixed proxy CIDR ranges, and internal `100.x` addresses are dynamic. Instead, Railway's public edge proxy replaces `X-Real-IP` on every incoming request. On Railway, set `CLIENT_IP_HEADER=X-Real-IP`. Note: requests routed over Railway private networking (`*.railway.internal`) bypass edge proxy sanitization, so the service must not be exposed to untrusted internal services.
 - When trusted, `X-Forwarded-For` is parsed from right to left, discarding proxy hops until the first untrusted client IP is found. Forged initial hops from untrusted clients are never used.
 - For dedicated proxy headers (e.g. `Fly-Client-IP` or `CF-Connecting-IP`), set `TRUSTED_PROXY_HEADER`.
 - **Shared IP Protection:** Bad token brute-force limiting throttles only invalid/unknown token probes. Legitimate bots sharing an IP (behind corporate NATs, VPNs, or shared proxies) with valid tokens are never locked out.
@@ -138,7 +146,7 @@ When running behind reverse proxies (Railway, Fly, Docker Caddy, Cloudflare):
 2. Add a **Volume** mounted at `/data`.
 3. Set variables: `DB_PATH=/data/botlink.db`, `ADMIN_PASSWORD=<strong password>`,
    `SESSION_SECRET=<long random string>`, `TOKEN_ENCRYPTION_KEY=<32+ char key>`,
-   `TRUSTED_PROXIES=10.0.0.0/8`, and `APP_ENV=production` so the
+   `CLIENT_IP_HEADER=X-Real-IP`, and `APP_ENV=production` so the
    startup checks fail fast if any credential is missing. Railway sets
    `PORT` automatically.
 4. If the app is behind a proxy that forwards `X-Forwarded-For`, set

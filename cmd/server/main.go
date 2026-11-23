@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -36,52 +38,28 @@ func main() {
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
 
 	secretStr := os.Getenv("SESSION_SECRET")
+	tokenKeyStr := os.Getenv("TOKEN_ENCRYPTION_KEY")
+	devMode := os.Getenv("BOTLINK_DEV") == "1"
 	ephemeral := false
 	var secret []byte
 	production := os.Getenv("FLY_APP_NAME") != "" || os.Getenv("APP_ENV") == "production" || os.Getenv("RAILWAY_ENVIRONMENT") != ""
-	if secretStr == "" {
-		generated, err := server.GenerateEphemeralSecret()
-		if err != nil {
-			logger.Fatalf("generate session secret: %v", err)
-		}
-		if production {
-			logger.Fatal("SESSION_SECRET is required in production")
-		}
-		secret = generated
-		ephemeral = true
-		logger.Println("WARNING: SESSION_SECRET is not set — using an ephemeral random secret; admin sessions will not survive restarts. Set SESSION_SECRET in production.")
-	} else {
-		if production && len(secretStr) < 32 {
-			logger.Fatal("SESSION_SECRET must be at least 32 characters in production")
-		}
-		secret = []byte(secretStr)
+	secret, tokenKey, ephemeral, err := resolveConfig(secretStr, tokenKeyStr, adminPassword, production, devMode)
+	if err != nil {
+		logger.Fatalf("configuration error: %v", err)
 	}
-
-	devMode := os.Getenv("BOTLINK_DEV") == "1" || os.Getenv("BOTLINK_DEV") == "true"
-	tokenKeyStr := os.Getenv("TOKEN_ENCRYPTION_KEY")
-	var tokenKey []byte
+	if ephemeral {
+		logger.Println("WARNING: SESSION_SECRET is not set — using an ephemeral random secret; admin sessions will not survive restarts. Set SESSION_SECRET in production.")
+	}
 	if tokenKeyStr == "" {
-		if !devMode {
-			logger.Fatal("TOKEN_ENCRYPTION_KEY is required (at least 32 characters). Set BOTLINK_DEV=1 to allow dev key derivation.")
-		}
-		if len(secret) >= 32 {
-			tokenKey = secret[:32]
-		} else {
-			h := sha256.Sum256(secret)
-			tokenKey = h[:]
-		}
 		logger.Println("WARNING: BOTLINK_DEV=1 enabled — deriving development TOKEN_ENCRYPTION_KEY.")
-	} else {
-		if len(tokenKeyStr) < 32 {
-			logger.Fatal("TOKEN_ENCRYPTION_KEY must be at least 32 characters")
-		}
-		tokenKey = []byte(tokenKeyStr)
 	}
 	if adminPassword == "" {
-		if production {
-			logger.Fatal("ADMIN_PASSWORD is required in production")
-		}
 		logger.Println("WARNING: ADMIN_PASSWORD is not set — admin login is disabled until it is set.")
+	}
+
+	clientIPHeader := os.Getenv("CLIENT_IP_HEADER")
+	if os.Getenv("RAILWAY_ENVIRONMENT") != "" && clientIPHeader == "" {
+		logger.Println("WARNING: running on Railway (RAILWAY_ENVIRONMENT is set) but CLIENT_IP_HEADER is not set. Set CLIENT_IP_HEADER=X-Real-IP so real client IPs can be determined accurately.")
 	}
 
 	if raw := os.Getenv("MAX_TURNS_LIMIT"); raw != "" {
@@ -133,6 +111,7 @@ func main() {
 		AdminPassword:          adminPassword,
 		SessionSecret:          secret,
 		SessionSecretEphemeral: ephemeral,
+		ClientIPHeader:         clientIPHeader,
 		TrustedProxyHeader:     trustedHeader,
 		TrustedProxies:         trustedProxies,
 		TrustHeaderAlways:      trustAlways,
@@ -168,4 +147,64 @@ func main() {
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Printf("shutdown: %v", err)
 	}
+}
+
+func deriveDevTokenKey(secret []byte) []byte {
+	salt := []byte("botlink-dev-token-encryption-key-salt")
+	info := []byte("botlink:token-encryption-key:v1")
+	// HKDF-Extract: PRK = HMAC-SHA256(salt, secret)
+	hExtract := hmac.New(sha256.New, salt)
+	hExtract.Write(secret)
+	prk := hExtract.Sum(nil)
+
+	// HKDF-Expand: OKM = HMAC-SHA256(PRK, info || 0x01)
+	hExpand := hmac.New(sha256.New, prk)
+	hExpand.Write(info)
+	hExpand.Write([]byte{0x01})
+	return hExpand.Sum(nil)
+}
+
+func resolveConfig(secretStr, tokenKeyStr, adminPassword string, production, devMode bool) (secret []byte, tokenKey []byte, ephemeral bool, err error) {
+	if production && devMode {
+		return nil, nil, false, errors.New("BOTLINK_DEV cannot be enabled in production environment")
+	}
+
+	if secretStr == "" {
+		if production {
+			return nil, nil, false, errors.New("SESSION_SECRET is required in production")
+		}
+		generated, gerr := server.GenerateEphemeralSecret()
+		if gerr != nil {
+			return nil, nil, false, fmt.Errorf("generate session secret: %w", gerr)
+		}
+		secret = generated
+		ephemeral = true
+	} else {
+		if production && len(secretStr) < 32 {
+			return nil, nil, false, errors.New("SESSION_SECRET must be at least 32 characters in production")
+		}
+		secret = []byte(secretStr)
+	}
+
+	if tokenKeyStr == "" {
+		if !devMode {
+			return nil, nil, false, errors.New("TOKEN_ENCRYPTION_KEY is required (at least 32 characters). Set BOTLINK_DEV=1 to allow dev key derivation.")
+		}
+		tokenKey = deriveDevTokenKey(secret)
+	} else {
+		if len(tokenKeyStr) < 32 {
+			return nil, nil, false, errors.New("TOKEN_ENCRYPTION_KEY must be at least 32 characters")
+		}
+		tokenKey = []byte(tokenKeyStr)
+	}
+
+	if adminPassword == "" {
+		if production {
+			return nil, nil, false, errors.New("ADMIN_PASSWORD is required in production")
+		}
+	} else if production && len(adminPassword) < 16 {
+		return nil, nil, false, errors.New("ADMIN_PASSWORD must be at least 16 characters in production")
+	}
+
+	return secret, tokenKey, ephemeral, nil
 }
