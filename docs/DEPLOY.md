@@ -89,6 +89,17 @@ sqlite3 /tmp/botlink_dryrun.db "SELECT count(*) FROM bot_members WHERE token_has
 rm -f /tmp/botlink_dryrun.db
 ```
 
+### Cleaning Up Leftover `.bak` Files After a Failed Migration
+If an automatic migration fails due to token decryption errors, key mismatch, or disk issues, the server intentionally aborts startup and preserves the snapshot backup file on disk (`<dbPath>.bak` or `<dbPath>.pre_migration_<nanos>.bak`) so operators can inspect or restore from it.
+Once the issue is investigated or resolved:
+1. If restoring from the backup: copy or move the `.bak` file back to `botlink.db`.
+2. After a successful migration or after verifying the database state, **always delete leftover `.bak` files** (`rm -f /data/*.bak`):
+```bash
+# Clean up any leftover pre-migration backups containing plaintext tokens
+rm -f ./data/*.bak
+```
+Leaving `.bak` files on disk exposes historical plaintext tokens, so routine verification should confirm no `.bak` files linger in production.
+
 ---
 
 ## 4. Redeployment & Rolling Restarts

@@ -816,6 +816,11 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		}
 	}
 
+	// 1. Enable secure_delete so overwritten plaintext columns are zeroed in database pages
+	if _, err := s.db.ExecContext(ctx, "PRAGMA secure_delete=ON"); err != nil {
+		return fmt.Errorf("enable secure_delete: %w", err)
+	}
+
 	err := s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx,
 			"SELECT group_id, bot_id, agent_token FROM bot_members WHERE agent_token != '' AND token_hash = ''")
@@ -868,6 +873,45 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 	if remaining != 0 {
 		return fmt.Errorf("migration verification failed: %d plaintext tokens remain", remaining)
 	}
+
+	// 2. Decrypt every token_enc with correct AAD and assert HashToken(plain) == token_hash
+	// Any failure halts startup and leaves bakPath intact for administrator inspection.
+	key := s.key()
+	rows, err := s.db.QueryContext(ctx, "SELECT group_id, bot_id, token_hash, token_enc FROM bot_members WHERE token_enc != ''")
+	if err != nil {
+		return fmt.Errorf("verify token query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var gid int64
+		var bid, th, te string
+		if err := rows.Scan(&gid, &bid, &th, &te); err != nil {
+			return fmt.Errorf("scan token row: %w", err)
+		}
+		plain, err := DecryptToken(key, te, MemberAAD(bid))
+		if err != nil {
+			return fmt.Errorf("migration verification failed: token_enc for group %d bot %s could not be decrypted: %w", gid, bid, err)
+		}
+		if HashToken(plain) != th {
+			return fmt.Errorf("migration verification failed: token hash mismatch for group %d bot %s", gid, bid)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("verify token rows error: %w", err)
+	}
+
+	// 3. Checkpoint WAL and truncate so old pages in WAL are committed and truncated
+	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("wal checkpoint truncate: %w", err)
+	}
+
+	// 4. Repack database with VACUUM so zeroed free-list pages are completely purged
+	if _, err := s.db.ExecContext(ctx, "VACUUM"); err != nil {
+		return fmt.Errorf("vacuum: %w", err)
+	}
+
+	// 5. Delete backup only after all verification steps and disk purges succeed
 	if bakPath != "" {
 		_ = os.Remove(bakPath)
 	}

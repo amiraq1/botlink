@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -661,6 +662,16 @@ VALUES (1, 'bot_1', 'Legacy Bot', 'legacy-plain-token-xyz-12345');
 		t.Errorf("expected backup file %s to be deleted after migration, got err: %v", bakPath, err)
 	}
 
+	// Verify raw bytes of .db, -wal, -shm do NOT contain plaintext token
+	tokenBytes := []byte("legacy-plain-token-xyz-12345")
+	for _, f := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if content, err := os.ReadFile(f); err == nil {
+			if bytes.Contains(content, tokenBytes) {
+				t.Fatalf("plaintext token found in raw file %s after migration!", f)
+			}
+		}
+	}
+
 	var agentToken, tokenHash, tokenEnc string
 	row := st.db.QueryRow("SELECT agent_token, token_hash, token_enc FROM bot_members WHERE group_id = 1 AND bot_id = 'bot_1'")
 	if err := row.Scan(&agentToken, &tokenHash, &tokenEnc); err != nil {
@@ -890,3 +901,88 @@ func TestBackupAndRestore(t *testing.T) {
 		t.Fatalf("expected 2 members in restored backup, got %d", len(detail.Members))
 	}
 }
+
+func TestTokenMigrationAbortsAndKeepsBackupOnVerificationFailure(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "legacy_fail.db")
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+
+	_, err = rawDB.Exec(`
+CREATE TABLE groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'waiting_for_leader',
+  turn_seq INTEGER NOT NULL DEFAULT 0,
+  max_turns INTEGER NOT NULL DEFAULT 20,
+  current_turn_bot_id TEXT DEFAULT '',
+  turn_queue TEXT NOT NULL DEFAULT '[]',
+  mock_delay_sec INTEGER NOT NULL DEFAULT 12,
+  turn_started_at INTEGER NOT NULL DEFAULT 0,
+  skip_streak INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE bot_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  role_title TEXT NOT NULL DEFAULT '',
+  accent_color TEXT NOT NULL DEFAULT '',
+  is_mock INTEGER NOT NULL DEFAULT 0,
+  agent_token TEXT NOT NULL DEFAULT '',
+  last_seen_at INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, bot_id)
+);
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES groups(id),
+  turn_seq INTEGER,
+  sender_bot_id TEXT NOT NULL DEFAULT '',
+  sender_name TEXT NOT NULL DEFAULT '',
+  sender_color TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'bot',
+  content TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE admin_sessions (
+  id TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+INSERT INTO groups (id, name, status, turn_seq, max_turns, current_turn_bot_id)
+VALUES (1, 'Legacy Group', 'active', 1, 10, 'bot_1');
+INSERT INTO bot_members (group_id, bot_id, name, agent_token)
+VALUES (1, 'bot_1', 'Legacy Bot', 'token-to-fail');
+CREATE TRIGGER tamper_hash AFTER UPDATE ON bot_members
+BEGIN
+  UPDATE bot_members SET token_hash = 'tampered_hash_that_does_not_match' WHERE bot_id = NEW.bot_id;
+END;
+`)
+	if err != nil {
+		rawDB.Close()
+		t.Fatalf("setup legacy schema: %v", err)
+	}
+	rawDB.Close()
+
+	validKey := []byte("01234567890123456789012345678901")
+	st, err := Open(dbPath, validKey)
+	t.Logf("Open error was: %v", err)
+	if err == nil {
+		if st != nil {
+			st.Close()
+		}
+		t.Fatal("expected Open to fail due to hash verification mismatch during token migration")
+	}
+
+	// Backup file must be preserved on failure!
+	bakPath := dbPath + ".bak"
+	if _, err := os.Stat(bakPath); err != nil {
+		t.Fatalf("expected backup file %s to be kept on migration failure, got err: %v", bakPath, err)
+	}
+}
+
