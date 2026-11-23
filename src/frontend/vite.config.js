@@ -10,7 +10,19 @@ export default defineConfig({
   build: {
     emptyOutDir: true,
     sourcemap: false,
-    minify: false,
+    minify: "oxc",
+    reportCompressedSize: false,
+    rolldownOptions: {
+      output: {
+        manualChunks(id) {
+          const p = id.replace(/\\/g, "/");
+          if (p.endsWith("/src/lib/api.ts")) return "api";
+          if (!p.includes("/node_modules/")) return;
+          if (/\/node_modules\/(react|react-dom|scheduler)\//.test(p)) return "react";
+          if (p.includes("/node_modules/@tanstack/")) return "tanstack";
+        },
+      },
+    },
   },
   optimizeDeps: {
     rolldownOptions: {

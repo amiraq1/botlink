@@ -1,10 +1,11 @@
-import { type Message, MessageRole } from "@/lib/api";
 import BotAvatar from "@/components/chat/BotAvatar";
+import { type Message, MessageRole } from "@/lib/api";
 import { accentClass, formatClockAr } from "@/lib/convert";
 import { cn } from "@/lib/utils";
+import { memo } from "react";
 
 /** One chat message: bot (start side, accent avatar) or leader (end side, blue). */
-export default function MessageBubble({
+function MessageBubble({
   message,
   index,
 }: {
@@ -22,7 +23,7 @@ export default function MessageBubble({
     return (
       <div
         data-ocid={`groupchat.message.${index}`}
-        className="flex justify-end gap-2"
+        className="msg-row flex justify-end gap-2"
       >
         <div className="flex min-w-0 max-w-[85%] flex-col items-start gap-1 md:max-w-[65%]">
           <span className="px-1 text-xs font-bold text-primary">القائد</span>
@@ -50,7 +51,7 @@ export default function MessageBubble({
       data-ocid={`groupchat.message.${index}`}
       className={cn(
         accentClass(message.senderColor, message.senderBotId),
-        "flex items-start justify-start gap-2.5",
+        "msg-row flex items-start justify-start gap-2.5",
       )}
     >
       <BotAvatar
@@ -75,3 +76,5 @@ export default function MessageBubble({
     </div>
   );
 }
+
+export default memo(MessageBubble);

@@ -28,8 +28,8 @@
   src: url("/assets/fonts/IBMPlexSansArabic-Arabic-400.woff2") format("woff2");
   font-weight: 400;
   font-display: swap;
-  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+FB50-FDFF,
-    U+FE70-FEFC, U+200C-200E;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+FB50-FDFF, U+FE70-FEFC,
+    U+200C-200E;
 }
 
 @font-face {
@@ -37,8 +37,8 @@
   src: url("/assets/fonts/IBMPlexSansArabic-Arabic-600.woff2") format("woff2");
   font-weight: 600;
   font-display: swap;
-  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+FB50-FDFF,
-    U+FE70-FEFC, U+200C-200E;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-08FF, U+FB50-FDFF, U+FE70-FEFC,
+    U+200C-200E;
 }
 
 @layer base {
@@ -252,6 +252,11 @@
     background-color: oklch(var(--bubble-bot));
     color: oklch(var(--bubble-bot-foreground));
     border-radius: var(--radius-bubble);
+  }
+  /* Long streams (up to 500 messages): skip layout/paint for offscreen rows. */
+  .msg-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 88px;
   }
   .bubble-leader {
     background-color: oklch(var(--bubble-leader));

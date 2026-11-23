@@ -1,4 +1,3 @@
-import type { GroupDetail } from "@/lib/api";
 import ChatTopBar from "@/components/chat/ChatTopBar";
 import Composer from "@/components/chat/Composer";
 import GroupInfoSheet from "@/components/chat/GroupInfoSheet";
@@ -8,6 +7,8 @@ import TurnStatusBar from "@/components/chat/TurnStatusBar";
 import { useGroupControls } from "@/components/chat/useGroupControls";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useGroupDetail } from "@/hooks/useAdminQueries";
+import { useGroupEvents } from "@/hooks/useLiveEvents";
+import type { GroupDetail } from "@/lib/api";
 import { parseGroupId } from "@/lib/convert";
 import { Link } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
@@ -82,7 +83,8 @@ function Chat({ detail }: { detail: GroupDetail }) {
 
 export default function GroupChatPage({ id }: { id: string }) {
   const groupId = parseGroupId(id);
-  const { data, isLoading } = useGroupDetail(groupId);
+  const live = useGroupEvents(groupId);
+  const { data, isLoading } = useGroupDetail(groupId, live);
 
   let body: ReactNode;
   if (groupId === null || (!isLoading && data === null)) {

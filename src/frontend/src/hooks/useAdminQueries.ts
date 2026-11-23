@@ -6,28 +6,58 @@ import {
   type MemberInput,
   type TurnMode,
   addMember as apiAddMember,
-  checkAuth,
   createGroup as apiCreateGroup,
   getGroupDetail as apiGetGroupDetail,
   listGroups as apiListGroups,
   pauseGroup as apiPauseGroup,
-  revokeAllSessions as apiRevokeAllSessions,
   removeMember as apiRemoveMember,
   resumeGroup as apiResumeGroup,
-  rotateMemberToken,
+  revokeAllSessions as apiRevokeAllSessions,
   sendLeaderMessage as apiSendLeaderMessage,
   setMaxTurns as apiSetMaxTurns,
   setTurnMode as apiSetTurnMode,
   skipCurrentTurn as apiSkipCurrentTurn,
   stopGroup as apiStopGroup,
+  checkAuth,
+  rotateMemberToken,
 } from "@/lib/api";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { lastRealMessageId, mergeDetail } from "@/lib/mergeDetail";
+import {
+  type GroupAction,
+  applyGroupAction,
+  applyLeaderMessage,
+  applyMaxTurns,
+  applyTurnMode,
+} from "@/lib/optimistic";
+import { authKey, groupKey, groupsKey } from "@/lib/queryKeys";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 export type { CreateGroupInput, MemberInput };
+export { authKey, groupKey, groupsKey };
 
-export const groupsKey = ["groups"] as const;
-export const groupKey = (id: GroupId) => ["group", id.toString()] as const;
-export const authKey = ["auth"] as const;
+/** Snapshot taken before an optimistic patch, restored on failure. */
+interface GroupSnapshot {
+  prev?: GroupDetail | null;
+}
+
+function takeSnapshot(queryClient: QueryClient, id: GroupId): GroupSnapshot {
+  return { prev: queryClient.getQueryData<GroupDetail | null>(groupKey(id)) };
+}
+
+function restoreSnapshot(
+  queryClient: QueryClient,
+  id: GroupId,
+  snapshot: GroupSnapshot | undefined,
+) {
+  if (snapshot?.prev !== undefined) {
+    queryClient.setQueryData(groupKey(id), snapshot.prev);
+  }
+}
 
 /** Whether the current browser session holds a valid admin cookie. */
 export function useIsAdmin() {
@@ -57,35 +87,27 @@ export function useGroups() {
 }
 
 /**
- * Group detail with delta polling: only newer messages are fetched, then
- * merged into the cached list (capped at 500) instead of resending the full
- * history every 2.5s. Hidden tabs stop polling via refetchIntervalInBackground.
+ * Group detail with delta polling and cache merging. When the live SSE stream
+ * is healthy (`live`), the fallback poll slows to 15s; otherwise it keeps the
+ * adaptive 2.5s/10s cadence.
  */
-export function useGroupDetail(id: GroupId | null) {
+export function useGroupDetail(id: GroupId | null, live = false) {
   const queryClient = useQueryClient();
   return useQuery<GroupDetail | null>({
     queryKey: id === null ? ["group", "none"] : groupKey(id),
     queryFn: async () => {
       if (id === null) return null;
       const cached = queryClient.getQueryData<GroupDetail | null>(groupKey(id));
-      const afterId = cached?.messages?.at(-1)?.id ?? 0;
+      const afterId = cached ? lastRealMessageId(cached.messages) : 0;
       const fresh = await apiGetGroupDetail(
         id,
         afterId ? { afterId, limit: 200 } : { limit: 100 },
       );
-      if (!fresh || !afterId || !cached) return fresh;
-      const merged = [...cached.messages];
-      const known = new Set(merged.map((m) => m.id));
-      for (const message of fresh.messages) {
-        if (!known.has(message.id)) merged.push(message);
-      }
-      return {
-        ...fresh,
-        messages: merged.length > 500 ? merged.slice(-500) : merged,
-      };
+      return mergeDetail(cached ?? null, fresh);
     },
     enabled: id !== null,
     refetchInterval: (query) => {
+      if (live) return 15_000;
       const data = query.state.data;
       if (!data) return 2500;
       const last = data.messages.at(-1)?.createdAt ?? data.group.updatedAt;
@@ -118,16 +140,37 @@ export function useCreateGroup() {
 }
 
 export function useSendLeaderMessage() {
+  const queryClient = useQueryClient();
   const refresh = useRefreshGroups();
-  return useMutation<void, Error, { groupId: GroupId; text: string }>({
+  return useMutation<
+    void,
+    Error,
+    { groupId: GroupId; text: string },
+    GroupSnapshot
+  >({
     mutationFn: ({ groupId, text }) => apiSendLeaderMessage(groupId, text),
-    onSuccess: (_data, { groupId }) => {
+    onMutate: async ({ groupId, text }) => {
+      await queryClient.cancelQueries({ queryKey: groupKey(groupId) });
+      const snapshot = takeSnapshot(queryClient, groupId);
+      const current = queryClient.getQueryData<GroupDetail | null>(
+        groupKey(groupId),
+      );
+      if (current) {
+        queryClient.setQueryData(
+          groupKey(groupId),
+          applyLeaderMessage(current, text),
+        );
+      }
+      return snapshot;
+    },
+    onError: (_err, { groupId }, snapshot) => {
+      restoreSnapshot(queryClient, groupId, snapshot);
+    },
+    onSettled: (_data, _err, { groupId }) => {
       refresh(groupId);
     },
   });
 }
-
-type GroupAction = "skip" | "pause" | "resume" | "stop";
 
 const groupActionFns: Record<GroupAction, (id: GroupId) => Promise<void>> = {
   skip: apiSkipCurrentTurn,
@@ -137,10 +180,28 @@ const groupActionFns: Record<GroupAction, (id: GroupId) => Promise<void>> = {
 };
 
 function useGroupAction(action: GroupAction) {
+  const queryClient = useQueryClient();
   const refresh = useRefreshGroups();
-  return useMutation<void, Error, GroupId>({
+  return useMutation<void, Error, GroupId, GroupSnapshot>({
     mutationFn: (groupId) => groupActionFns[action](groupId),
-    onSuccess: (_data, groupId) => {
+    onMutate: async (groupId) => {
+      await queryClient.cancelQueries({ queryKey: groupKey(groupId) });
+      const snapshot = takeSnapshot(queryClient, groupId);
+      const current = queryClient.getQueryData<GroupDetail | null>(
+        groupKey(groupId),
+      );
+      if (current) {
+        queryClient.setQueryData(
+          groupKey(groupId),
+          applyGroupAction(current, action),
+        );
+      }
+      return snapshot;
+    },
+    onError: (_err, groupId, snapshot) => {
+      restoreSnapshot(queryClient, groupId, snapshot);
+    },
+    onSettled: (_data, _err, groupId) => {
       refresh(groupId);
     },
   });
@@ -163,20 +224,66 @@ export function useStopGroup() {
 }
 
 export function useSetTurnMode() {
+  const queryClient = useQueryClient();
   const refresh = useRefreshGroups();
-  return useMutation<void, Error, { groupId: GroupId; mode: TurnMode }>({
+  return useMutation<
+    void,
+    Error,
+    { groupId: GroupId; mode: TurnMode },
+    GroupSnapshot
+  >({
     mutationFn: ({ groupId, mode }) => apiSetTurnMode(groupId, mode),
-    onSuccess: (_data, { groupId }) => {
+    onMutate: async ({ groupId, mode }) => {
+      await queryClient.cancelQueries({ queryKey: groupKey(groupId) });
+      const snapshot = takeSnapshot(queryClient, groupId);
+      const current = queryClient.getQueryData<GroupDetail | null>(
+        groupKey(groupId),
+      );
+      if (current) {
+        queryClient.setQueryData(
+          groupKey(groupId),
+          applyTurnMode(current, mode),
+        );
+      }
+      return snapshot;
+    },
+    onError: (_err, { groupId }, snapshot) => {
+      restoreSnapshot(queryClient, groupId, snapshot);
+    },
+    onSettled: (_data, _err, { groupId }) => {
       refresh(groupId);
     },
   });
 }
 
 export function useSetMaxTurns() {
+  const queryClient = useQueryClient();
   const refresh = useRefreshGroups();
-  return useMutation<void, Error, { groupId: GroupId; maxTurns: number }>({
+  return useMutation<
+    void,
+    Error,
+    { groupId: GroupId; maxTurns: number },
+    GroupSnapshot
+  >({
     mutationFn: ({ groupId, maxTurns }) => apiSetMaxTurns(groupId, maxTurns),
-    onSuccess: (_data, { groupId }) => {
+    onMutate: async ({ groupId, maxTurns }) => {
+      await queryClient.cancelQueries({ queryKey: groupKey(groupId) });
+      const snapshot = takeSnapshot(queryClient, groupId);
+      const current = queryClient.getQueryData<GroupDetail | null>(
+        groupKey(groupId),
+      );
+      if (current) {
+        queryClient.setQueryData(
+          groupKey(groupId),
+          applyMaxTurns(current, maxTurns),
+        );
+      }
+      return snapshot;
+    },
+    onError: (_err, { groupId }, snapshot) => {
+      restoreSnapshot(queryClient, groupId, snapshot);
+    },
+    onSettled: (_data, _err, { groupId }) => {
       refresh(groupId);
     },
   });

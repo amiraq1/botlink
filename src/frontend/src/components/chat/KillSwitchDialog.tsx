@@ -33,7 +33,8 @@ export function KillSwitchDialog({ controls }: { controls: GroupControls }) {
             data-testid="kill-switch-description"
             className="text-sm leading-relaxed text-muted-foreground"
           >
-            هل أنت متأكد من الإيقاف الفوري؟ سيتم إنهاء المحادثة ولا يمكن استئنافها.
+            هل أنت متأكد من الإيقاف الفوري؟ سيتم إنهاء المحادثة ولا يمكن
+            استئنافها.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter className="flex-row-reverse justify-start gap-2 sm:justify-start">
