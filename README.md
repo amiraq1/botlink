@@ -78,9 +78,9 @@ Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + 
 
 ### Admin Login Rate Limiting & Progressive Delay
 
-- **Progressive Delay**: To defeat brute-force dictionary attacks while preventing Denial of Service (locking the administrator out), login attempts undergo progressive backoff after 5 consecutive failures across any IP: 1s, 2s, 4s, 8s, 16s, capped at 30s.
-- **No Administrator Lockout**: An attacker cannot permanently lock out the administrator. A login attempt with the correct `ADMIN_PASSWORD` waits out the current delay, authenticates successfully with HTTP 200, and immediately resets the global failure counter back to 0.
-- **Recovery Procedure**: To clear the delay, either log in with the correct password (waiting up to 30s for the delay to elapse), or restart the single-instance container process (the delay counter is held in memory).
+- **Serialized Evaluation & 3-Waiter Queue**: Password checks are serialized with a 1-second penalty per failed attempt, and the admission queue holds at most 3 concurrent waiters. Any excess attempts receive HTTP 429 (`login queue saturated: rejecting excess attempts with 429`).
+- **DoS Profile**: A distributed attacker occupying all 3 waiter slots can cause legitimate administrator login attempts to receive HTTP 429 while saturated. Because rate limiting cannot distinguish between an attacker and an admin on dynamic networks, the fundamental line of defense is **password entropy**: always configure `ADMIN_PASSWORD` with $\ge 16$ characters (or randomly generated 32+ characters), making brute force computationally impossible.
+- **Progressive Delay & Recovery**: Login attempts also track per-IP limits. To clear temporary rate limits, wait out the delay or restart the single-instance container.
 
 
 ### Single-Instance Architecture

@@ -75,6 +75,9 @@ type Server struct {
 	loginEvalMu  sync.Mutex
 	loginAttempt map[string][]time.Time
 
+	lastLoginSaturationLog time.Time
+	saturationLogMu        sync.Mutex
+
 	roomGETLimiter  *windowLimiter
 	roomPOSTLimiter *windowLimiter
 	roomIPLimiter   *windowLimiter
@@ -380,6 +383,16 @@ func (s *Server) loginAllowed(ip string, now time.Time) bool {
 	return true
 }
 
+func (s *Server) logLoginQueueSaturated() {
+	s.saturationLogMu.Lock()
+	defer s.saturationLogMu.Unlock()
+	now := time.Now()
+	if now.Sub(s.lastLoginSaturationLog) >= 10*time.Second {
+		s.lastLoginSaturationLog = now
+		s.log.Println("login queue saturated: rejecting excess attempts with 429")
+	}
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, private")
 	w.Header().Set("Pragma", "no-cache")
@@ -398,6 +411,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.loginMu.Lock()
 	if s.loginWaiters >= 3 {
 		s.loginMu.Unlock()
+		s.logLoginQueueSaturated()
 		w.Header().Set("Retry-After", "2")
 		writeError(w, http.StatusTooManyRequests, "too many login attempts in progress")
 		return

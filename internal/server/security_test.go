@@ -2,12 +2,14 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1369,5 +1371,58 @@ func TestProductionEnforcesSecureCookieOnPlainHTTPRequest(t *testing.T) {
 	}
 	if !strings.Contains(cookieHeader, "SameSite=Strict") {
 		t.Fatalf("production Set-Cookie header missing 'SameSite=Strict': %s", cookieHeader)
+	}
+}
+
+func TestLoginQueueSaturationRateLimitedLog(t *testing.T) {
+	var logBuf bytes.Buffer
+	srv, _ := newTestServer(t, "correct-long-admin-password-16char")
+	srv.log = log.New(&logBuf, "", 0)
+
+	var wg sync.WaitGroup
+
+	// Launch 3 requests that will wait
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"wrong-password"}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.RemoteAddr = fmt.Sprintf("192.0.2.%d:12345", idx+1)
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+		}(i)
+	}
+
+	// Wait briefly for the 3 waiters to occupy the queue
+	eventually(t, 2*time.Second, 10*time.Millisecond, func() bool {
+		srv.loginMu.Lock()
+		w := srv.loginWaiters
+		srv.loginMu.Unlock()
+		return w == 3
+	})
+
+	// 4th request must be rejected with 429
+	req4 := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(`{"password":"wrong-password"}`))
+	req4.Header.Set("Content-Type", "application/json")
+	req4.RemoteAddr = "192.0.2.99:12345"
+	rec4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec4, req4)
+
+	if rec4.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 4th request to get 429, got: %d", rec4.Code)
+	}
+
+	// Wait for goroutines to finish
+	wg.Wait()
+
+	logged := logBuf.String()
+	expectedLog := "login queue saturated: rejecting excess attempts with 429"
+	if !strings.Contains(logged, expectedLog) {
+		t.Fatalf("expected log to contain %q, but got: %q", expectedLog, logged)
+	}
+	// Assert no IP address was logged
+	if strings.Contains(logged, "192.0.2.") {
+		t.Fatalf("privacy violation: log contained client IP address: %q", logged)
 	}
 }
