@@ -116,6 +116,7 @@ func main() {
 		TrustedProxies:         trustedProxies,
 		TrustHeaderAlways:      trustAlways,
 		TurnTimeoutSec:         turnTimeoutSec,
+		Production:             production,
 	}, st)
 	st.SetTurnTimeout(turnTimeoutSec)
 

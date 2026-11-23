@@ -1324,3 +1324,50 @@ func TestRoomPayloadCapAndLazyBodyReading(t *testing.T) {
 		t.Fatalf("expected 400 Bad Request for payload > 64KB, got: %d (body: %s)", recValidTooBig.Code, recValidTooBig.Body.String())
 	}
 }
+
+func TestProductionEnforcesSecureCookieOnPlainHTTPRequest(t *testing.T) {
+	st := openTestStore(t)
+	defer st.Close()
+	secret, err := GenerateEphemeralSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Server configured with Production = true
+	srv := New(Config{
+		Addr:            ":0",
+		DBPath:          filepath.Join(t.TempDir(), "prod.db"),
+		FrontendDistDir: t.TempDir(),
+		AdminPassword:   "correct-production-password-12345",
+		SessionSecret:   secret,
+		Production:      true,
+	}, st)
+
+	// Plain HTTP request without TLS and without any X-Forwarded-Proto header
+	loginBody := `{"password":"correct-production-password-12345"}`
+	req := httptest.NewRequest("POST", "/api/auth/login", strings.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected login 200 OK, got: %d", rec.Code)
+	}
+
+	cookieHeader := rec.Header().Get("Set-Cookie")
+	if cookieHeader == "" {
+		t.Fatal("missing Set-Cookie header")
+	}
+
+	// Must contain Secure attribute even on plain HTTP request in production!
+	if !strings.Contains(cookieHeader, "Secure") {
+		t.Fatalf("security violation: production Set-Cookie header missing 'Secure' attribute on plain HTTP request: %s", cookieHeader)
+	}
+	if !strings.Contains(cookieHeader, "HttpOnly") {
+		t.Fatalf("production Set-Cookie header missing 'HttpOnly': %s", cookieHeader)
+	}
+	if !strings.Contains(cookieHeader, "SameSite=Strict") {
+		t.Fatalf("production Set-Cookie header missing 'SameSite=Strict': %s", cookieHeader)
+	}
+}

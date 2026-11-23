@@ -46,6 +46,10 @@ type Config struct {
 	// identity strictly from this request header (e.g. X-Real-IP on Railway).
 	ClientIPHeader string
 	TurnTimeoutSec int64
+	// Production indicates the server is running in production mode (enforcing secure cookies).
+	Production bool
+	// CookieSecure explicitly forces the Secure attribute on cookies.
+	CookieSecure bool
 	// Clock, when provided, overrides the millisecond time source for testing.
 	Clock func() int64
 }
@@ -63,6 +67,8 @@ type Server struct {
 	trustedProxyHeader string
 	trustedProxies     []*net.IPNet
 	trustHeaderAlways  bool
+	production         bool
+	cookieSecure       bool
 
 	loginMu      sync.Mutex
 	loginWaiters int
@@ -108,6 +114,8 @@ func New(cfg Config, st *store.Store) *Server {
 		trustedProxyHeader: cfg.TrustedProxyHeader,
 		trustedProxies:     cfg.TrustedProxies,
 		trustHeaderAlways:  cfg.TrustHeaderAlways,
+		production:         cfg.Production,
+		cookieSecure:       cfg.CookieSecure,
 		loginAttempt:       map[string][]time.Time{},
 		roomGETLimiter:     newWindowLimiter(60, time.Minute, 8192),
 		roomPOSTLimiter:    newWindowLimiter(10, time.Minute, 8192),

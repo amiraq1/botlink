@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -64,9 +65,14 @@ func verifySessionToken(secret []byte, token string, now time.Time) (string, boo
 	return sessionID, true
 }
 
-// secureRequest only believes X-Forwarded-Proto when it came from a trusted
-// proxy (or from the Fly edge, where trustHeaderAlways is enabled).
+// secureRequest returns whether the cookie should have the Secure flag set.
+// In production or when COOKIE_SECURE is configured, the Secure attribute is
+// unconditional (even when behind internal TLS-terminating proxies on plain HTTP).
+// In development, it respects local TLS or trusted proxy X-Forwarded-Proto headers.
 func (s *Server) secureRequest(r *http.Request) bool {
+	if s.production || s.cookieSecure || os.Getenv("COOKIE_SECURE") == "1" {
+		return true
+	}
 	if r.TLS != nil {
 		return true
 	}
