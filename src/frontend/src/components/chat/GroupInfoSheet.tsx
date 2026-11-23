@@ -1,4 +1,3 @@
-import type { GroupDetail } from "@/lib/api";
 import AddMemberForm from "@/components/chat/AddMemberForm";
 import {
   ControlsSection,
@@ -15,6 +14,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import type { GroupDetail } from "@/lib/api";
 import { formatNumberAr } from "@/lib/convert";
 
 /** Drawer with turn mode, controls, max turns, add-bot form and the members list. */

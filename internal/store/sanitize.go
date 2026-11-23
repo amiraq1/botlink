@@ -3,6 +3,17 @@ package store
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
+)
+
+var (
+	linkMarker = []rune("[LINK_REMOVED]")
+	// linkPatterns are precomputed once: pass 2 runs on every message.
+	linkPatterns = [][]rune{
+		[]rune("http://"),
+		[]rune("https://"),
+		[]rune("www."),
+	}
 )
 
 // Sanitize ports the exact sanitization logic from src/backend/lib/rooms.mo:
@@ -15,7 +26,11 @@ import (
 //   - Trim and cap at 3000 runes.
 func Sanitize(raw string) string {
 	// Pass 1.
-	var cleaned []rune
+	capacity := len(raw)
+	if capacity > 30000 {
+		capacity = 30000
+	}
+	cleaned := make([]rune, 0, capacity)
 	count := 0
 	for _, r := range raw {
 		if count >= 30000 {
@@ -33,22 +48,22 @@ func Sanitize(raw string) string {
 	}
 
 	// Pass 2.
-	patterns := []string{"http://", "https://", "www."}
-	var result []rune
+	result := make([]rune, 0, len(cleaned))
 	i := 0
 	for i < len(cleaned) {
-		if (lowerRune(cleaned[i]) == 'h' || lowerRune(cleaned[i]) == 'w') && matchPattern(cleaned, i, patterns) {
+		ch := cleaned[i]
+		if (ch == 'h' || ch == 'H' || ch == 'w' || ch == 'W') && matchPattern(cleaned, i, linkPatterns) {
 			// A link wrapped as "[http://...]" must not leave a doubled bracket behind.
 			if n := len(result); n > 0 && result[n-1] == '[' {
 				result = result[:n-1]
 			}
-			result = append(result, []rune("[LINK_REMOVED]")...)
+			result = append(result, linkMarker...)
 			for i < len(cleaned) && !unicode.IsSpace(cleaned[i]) {
 				i++
 			}
 			continue
 		}
-		result = append(result, cleaned[i])
+		result = append(result, ch)
 		i++
 	}
 
@@ -103,9 +118,8 @@ func lowerRune(r rune) rune {
 	return r
 }
 
-func matchPattern(rs []rune, i int, patterns []string) bool {
-	for _, p := range patterns {
-		pr := []rune(p)
+func matchPattern(rs []rune, i int, patterns [][]rune) bool {
+	for _, pr := range patterns {
 		if i+len(pr) > len(rs) {
 			continue
 		}
@@ -124,9 +138,9 @@ func matchPattern(rs []rune, i int, patterns []string) bool {
 }
 
 func truncateRunes(s string, limit int) string {
-	rs := []rune(s)
-	if len(rs) > limit {
-		return string(rs[:limit])
+	if utf8.RuneCountInString(s) <= limit {
+		return s
 	}
-	return s
+	rs := []rune(s)
+	return string(rs[:limit])
 }

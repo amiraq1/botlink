@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # BOTLINK — Go + SQLite unified server (REST API + React frontend)
 # Multi-stage: Node/pnpm frontend build -> Go static binary -> minimal Alpine.
 
@@ -7,7 +8,8 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.26.1 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY src/frontend/package.json src/frontend/
-RUN pnpm install --frozen-lockfile --filter botlink-frontend...
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
+    pnpm install --frozen-lockfile --filter botlink-frontend...
 COPY src/frontend src/frontend
 RUN pnpm --filter botlink-frontend build
 
@@ -15,10 +17,12 @@ RUN pnpm --filter botlink-frontend build
 FROM golang:1.27.4-bookworm AS gobuild
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd cmd
 COPY internal internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /botlink ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /botlink ./cmd/server
 
 # ---- Stage 3: minimal runtime ----------------------------------------------
 FROM alpine:3.21

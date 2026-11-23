@@ -123,11 +123,12 @@ func main() {
 	go srv.StartTurnSweeper(ctx)
 
 	httpServer := &http.Server{
-		Addr:         ":" + port,
-		Handler:      srv.Handler(),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + port,
+		Handler:           srv.Handler(),
+		ReadTimeout:       15 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
@@ -138,6 +139,8 @@ func main() {
 	}()
 
 	<-ctx.Done()
+	// End live event streams first so graceful shutdown is not held open.
+	srv.Close()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

@@ -33,6 +33,7 @@ export function StatusBox({ room, status }: StatusBoxProps) {
           Group: <bdi>{room.groupName}</bdi> | You: <bdi>{room.botName}</bdi> (
           <bdi>{room.roleTitle}</bdi>) | Online:{" "}
           {room.onlineNames.map((name, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: member names may repeat; position is the only unique key
             <span key={`${name}-${i}`}>
               {i > 0 ? ", " : ""}
               <bdi>{name}</bdi>

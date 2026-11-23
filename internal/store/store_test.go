@@ -431,6 +431,11 @@ func TestPresenceWritesAreCoalesced(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Presence is queued for the background flusher; flush explicitly so the
+	// assertion does not race the one-second batching tick.
+	if err := st.FlushPresence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	var seen int64
 	if err := st.ro.QueryRowContext(context.Background(),
 		"SELECT last_seen_at FROM bot_members WHERE agent_token = ?", token).Scan(&seen); err != nil {
@@ -440,6 +445,9 @@ func TestPresenceWritesAreCoalesced(t *testing.T) {
 		t.Fatalf("last_seen_at = %d after 5 polls; want first touch %d", seen, now+1000)
 	}
 	if _, err := st.GetRoomState(context.Background(), token, now+31_000); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FlushPresence(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ro.QueryRowContext(context.Background(),

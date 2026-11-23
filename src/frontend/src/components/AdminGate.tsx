@@ -6,7 +6,12 @@ import { authKey, useIsAdmin } from "@/hooks/useAdminQueries";
 import { login } from "@/lib/api";
 import { useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
-import { type FormEvent, type ReactNode, useLayoutEffect, useState } from "react";
+import {
+  type FormEvent,
+  type ReactNode,
+  useLayoutEffect,
+  useState,
+} from "react";
 
 /**
  * Applies the dark RTL Arabic admin look to the document while the admin shell

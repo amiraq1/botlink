@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -60,7 +61,21 @@ type Server struct {
 	roomGETLimiter  *windowLimiter
 	roomPOSTLimiter *windowLimiter
 	roomIPLimiter   *windowLimiter
+
+	broker       *eventBroker
+	sched        *turnScheduler
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
 }
+
+const (
+	maxEventSubscribers         = 512
+	maxEventSubscribersPerGroup = 128
+	streamHeartbeat             = 20 * time.Second
+	streamLifetime              = 2 * time.Minute
+	streamWriteDeadline         = 30 * time.Second
+	streamRetryMs               = 3000
+)
 
 func New(cfg Config, st *store.Store) *Server {
 	s := &Server{
@@ -78,6 +93,10 @@ func New(cfg Config, st *store.Store) *Server {
 		roomPOSTLimiter:    newWindowLimiter(10, time.Minute, 8192),
 		roomIPLimiter:      newWindowLimiter(180, time.Minute, 8192),
 	}
+	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
+	s.broker = newEventBroker(maxEventSubscribers, maxEventSubscribersPerGroup)
+	s.sched = newTurnScheduler(st, s.turnTimeoutMs, s.log)
+	st.SetChangeHook(s.onGroupChange)
 	if len(s.trustedProxies) == 0 {
 		s.trustedProxies = parseCIDRs(DefaultTrustedProxies)
 	}
@@ -86,7 +105,23 @@ func New(cfg Config, st *store.Store) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return s.securityHeaders(s.mux)
+	return s.gzipMiddleware(s.securityHeaders(s.mux))
+}
+
+// Close stops live event streams and releases their subscriptions. Call it
+// before http.Server.Shutdown so graceful shutdown is not held open.
+func (s *Server) Close() {
+	if s.streamCancel != nil {
+		s.streamCancel()
+	}
+	if s.broker != nil {
+		s.broker.closeAll()
+	}
+}
+
+func (s *Server) onGroupChange(groupID int64) {
+	s.broker.publish(groupID)
+	s.sched.wake()
 }
 
 func (s *Server) routes() {
@@ -100,11 +135,13 @@ func (s *Server) routes() {
 	// Public agent room: never requires auth, never leaks tokens.
 	s.mux.HandleFunc("GET /api/room/{token}", s.handleRoomState)
 	s.mux.HandleFunc("POST /api/room/{token}/reply", s.handleRoomReply)
+	s.mux.HandleFunc("GET /api/room/{token}/events", s.handleRoomEvents)
 
 	// Admin API: cookie auth enforced on every route.
 	s.mux.HandleFunc("GET /api/admin/groups", s.requireAdmin(s.handleListGroups))
 	s.mux.HandleFunc("POST /api/admin/groups", s.requireAdmin(s.handleCreateGroup))
 	s.mux.HandleFunc("GET /api/admin/groups/{id}", s.requireAdmin(s.handleGetGroup))
+	s.mux.HandleFunc("GET /api/admin/groups/{id}/events", s.requireAdmin(s.handleGroupEvents))
 	s.mux.HandleFunc("POST /api/admin/groups/{id}/leader-message", s.requireAdmin(s.handleLeaderMessage))
 	s.mux.HandleFunc("POST /api/admin/groups/{id}/skip", s.requireAdmin(s.handleSkip))
 	s.mux.HandleFunc("POST /api/admin/groups/{id}/pause", s.requireAdmin(s.handlePause))
@@ -323,7 +360,24 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("null"))
 		return
 	}
-	writeJSON(w, http.StatusOK, state)
+	writeJSONConditional(w, r, roomETagSeed(state), state)
+}
+
+// roomETagSeed fingerprints every visible field of a room response, so a 304
+// is only returned when nothing the agent can see has changed.
+func roomETagSeed(state *store.RoomState) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%d|%d|%s|%s|%s|%s|%s|%t|%d|",
+		state.Status, state.TurnSeq, state.MaxTurns, state.BotID, state.BotName,
+		state.RoleTitle, state.GroupName, state.Topic, state.IsYourTurn, len(state.Messages))
+	for _, name := range state.OnlineNames {
+		b.WriteString(name)
+		b.WriteByte(0)
+	}
+	if n := len(state.Messages); n > 0 {
+		fmt.Fprintf(&b, "%d|%d", state.Messages[0].ID, state.Messages[n-1].ID)
+	}
+	return b.String()
 }
 
 func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
@@ -390,12 +444,45 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
+	if limit > 200 {
+		limit = 100
+	}
 	detail, err := s.store.GetGroupDetailPaged(r.Context(), id, nowMs(), beforeID, afterID, limit)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+	writeJSONConditional(w, r, groupDetailETagSeed(id, beforeID, afterID, detail), detail)
+}
+
+// groupDetailETagSeed fingerprints the admin group view. lastSeenAt is
+// deliberately excluded: the UI renders the boolean online flag, so presence
+// write churn must not invalidate the cache, while a change in online state
+// does.
+func groupDetailETagSeed(id, beforeID, afterID int64, d *store.GroupDetail) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d|%d|%d|%d|%s|%s|%s|%s|%s|%d|%d|",
+		id, beforeID, afterID, d.Group.ID, d.Group.Name, d.Group.Description,
+		d.Group.Topic, d.Group.Status, d.Group.TurnMode, d.Group.MaxTurns, d.Group.TurnSeq)
+	if d.Group.CurrentTurnBotID != nil {
+		b.WriteString(*d.Group.CurrentTurnBotID)
+	}
+	b.WriteByte('|')
+	for _, queued := range d.Group.TurnQueue {
+		b.WriteString(queued)
+		b.WriteByte(',')
+	}
+	fmt.Fprintf(&b, "|%d|%d|%d|%d|", d.Group.MockDelaySec, d.Group.TurnStartedAt,
+		d.Group.SkipStreak, d.Group.UpdatedAt)
+	for _, m := range d.Members {
+		fmt.Fprintf(&b, "%s:%s:%s:%s:%t:%t:%s|", m.BotID, m.Name, m.RoleTitle,
+			m.AccentColor, m.IsMock, m.Online, m.AgentToken)
+	}
+	fmt.Fprintf(&b, "%t|%d|", d.HasMore, len(d.Messages))
+	if n := len(d.Messages); n > 0 {
+		fmt.Fprintf(&b, "%d|%d", d.Messages[0].ID, d.Messages[n-1].ID)
+	}
+	return b.String()
 }
 
 func (s *Server) handleLeaderMessage(w http.ResponseWriter, r *http.Request) {
@@ -539,6 +626,12 @@ func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	}
 	dist := s.cfg.FrontendDistDir
 	upath := path.Clean("/" + strings.TrimPrefix(r.URL.Path, "/"))
+	if strings.HasPrefix(upath, "/assets/") {
+		// Vite content-hashes every asset file name.
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
 	// Never serve outside the dist dir.
 	candidate := filepath.Join(dist, filepath.FromSlash(upath))
 	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
@@ -561,9 +654,11 @@ func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// StartTurnSweeper runs the 15-second safety net for mock replies, silent
-// real bots and expired admin sessions until ctx ends.
+// StartTurnSweeper starts the precise turn scheduler (mock replies and
+// silent-bot timeouts at their exact due time) and the 15-second safety net
+// for sessions, retention and any event the scheduler missed.
 func (s *Server) StartTurnSweeper(ctx context.Context) {
+	go s.sched.run(ctx)
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
