@@ -1,12 +1,8 @@
 node_modules/
 dist/
-.mops/
-.old/
 .platform/
 .pnpm-store/
 .cache/
-.icp/
-/deployed/
 # Go + SQLite server
 data/
 *.db
@@ -15,3 +11,8 @@ data/
 /botlink
 # Self-host deployment secrets (see .env.example)
 .env
+# Scratch and local tool files
+scratchpad/
+review-package.txt
+.commandcode/
+.workbuddy-ai/
