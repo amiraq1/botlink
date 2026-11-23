@@ -53,6 +53,9 @@ func gzipWanted(r *http.Request) bool {
 }
 
 func gzipCompressible(contentType string) bool {
+	if strings.HasPrefix(contentType, "text/event-stream") {
+		return false
+	}
 	switch {
 	case strings.HasPrefix(contentType, "application/json"),
 		strings.HasPrefix(contentType, "text/"),

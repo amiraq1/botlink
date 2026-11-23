@@ -23,8 +23,10 @@ func TestTokenCrypto(t *testing.T) {
 		t.Fatalf("expected 64 hex chars, got %d", len(h1))
 	}
 
+	aad := MemberAAD("bot_1")
+
 	// Encryption & Decryption
-	enc, err := EncryptToken(key, token)
+	enc, err := EncryptToken(key, token, aad)
 	if err != nil {
 		t.Fatalf("encrypt: %v", err)
 	}
@@ -32,7 +34,7 @@ func TestTokenCrypto(t *testing.T) {
 		t.Fatal("ciphertext equals plaintext")
 	}
 
-	dec, err := DecryptToken(key, enc)
+	dec, err := DecryptToken(key, enc, aad)
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}
@@ -40,17 +42,22 @@ func TestTokenCrypto(t *testing.T) {
 		t.Fatalf("expected %q, got %q", token, dec)
 	}
 
+	// Mismatched AAD fails decryption
+	if _, err := DecryptToken(key, enc, MemberAAD("bot_2")); err == nil {
+		t.Fatal("expected decryption error on mismatched AAD")
+	}
+
 	// Short key rejected
-	if _, err := EncryptToken([]byte("short"), token); err != ErrKeyTooShort {
+	if _, err := EncryptToken([]byte("short"), token, aad); err != ErrKeyTooShort {
 		t.Fatalf("expected ErrKeyTooShort, got %v", err)
 	}
-	if _, err := DecryptToken([]byte("short"), enc); err != ErrKeyTooShort {
+	if _, err := DecryptToken([]byte("short"), enc, aad); err != ErrKeyTooShort {
 		t.Fatalf("expected ErrKeyTooShort, got %v", err)
 	}
 
 	// Corrupted ciphertext rejected
 	corrupted := enc[:len(enc)-4] + "dead"
-	if _, err := DecryptToken(key, corrupted); err == nil {
+	if _, err := DecryptToken(key, corrupted, aad); err == nil {
 		t.Fatal("expected decryption error on corrupted ciphertext")
 	}
 }

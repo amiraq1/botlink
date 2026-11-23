@@ -24,9 +24,15 @@ func HashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// MemberAAD returns the Additional Authenticated Data bound to a member's encrypted token.
+func MemberAAD(botID string) []byte {
+	return []byte("member:" + botID)
+}
+
 // EncryptToken encrypts the plain agent token with AES-256-GCM.
-// Returns the hex-encoded ciphertext with the 12-byte nonce prepended.
-func EncryptToken(key []byte, token string) (string, error) {
+// A cryptographically random 12-byte nonce is generated for every encryption.
+// The optional aad binds ciphertext to additional authenticated data (e.g. member ID).
+func EncryptToken(key []byte, token string, aad []byte) (string, error) {
 	if len(key) < 32 {
 		return "", ErrKeyTooShort
 	}
@@ -44,12 +50,12 @@ func EncryptToken(key []byte, token string) (string, error) {
 		return "", fmt.Errorf("rand nonce: %w", err)
 	}
 
-	sealed := gcm.Seal(nonce, nonce, []byte(token), nil)
+	sealed := gcm.Seal(nonce, nonce, []byte(token), aad)
 	return hex.EncodeToString(sealed), nil
 }
 
-// DecryptToken decrypts an AES-256-GCM hex-encoded token.
-func DecryptToken(key []byte, encHex string) (string, error) {
+// DecryptToken decrypts an AES-256-GCM hex-encoded token verifying aad.
+func DecryptToken(key []byte, encHex string, aad []byte) (string, error) {
 	if len(key) < 32 {
 		return "", ErrKeyTooShort
 	}
@@ -72,7 +78,7 @@ func DecryptToken(key []byte, encHex string) (string, error) {
 	}
 
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, aad)
 	if err != nil {
 		return "", ErrDecryptionFailed
 	}

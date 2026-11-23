@@ -65,9 +65,10 @@ pnpm --filter botlink-frontend dev   # Vite dev server on :5173, /api proxied to
 | `FRONTEND_DIST_DIR` | `./src/frontend/dist` | Built React assets (SPA fallback to `index.html`) |
 | `ADMIN_PASSWORD` | *(unset)* | **Required for admin login** — login is disabled until it is set |
 | `SESSION_SECRET` | *(ephemeral)* | HMAC secret for admin session cookies; required (min 32 chars) in production; an unset secret is generated per-process only in dev |
-| `TOKEN_ENCRYPTION_KEY` | *(derived in dev)* | AES-256-GCM encryption key for agent tokens stored at rest; required (min 32 chars) in production |
+| `TOKEN_ENCRYPTION_KEY` | *(required; min 32 chars)* | AES-256-GCM encryption key for agent tokens at rest; startup fails if missing or < 32 bytes unless `BOTLINK_DEV=1` is set |
+| `BOTLINK_DEV` | `0` | Set to `1` only in local development to permit an ephemeral fallback encryption key |
 | `TRUSTED_PROXY_HEADER` | *(unset; `Fly-Client-IP` on Fly)* | Header carrying the real client IP, trusted only from a trusted peer |
-| `TRUSTED_PROXIES` | loopback + private ranges | Comma-separated CIDRs allowed to forward `X-Forwarded-For` (read right-to-left) |
+| `TRUSTED_PROXIES` | `127.0.0.1/32, ::1/128` | Comma-separated CIDRs allowed to forward `X-Forwarded-For`; defaults to loopback only. On Railway, set `10.0.0.0/8`. |
 | `TURN_TIMEOUT_SEC` | `90` | Skip a silent real bot after this many seconds |
 | `MAX_TURNS_LIMIT` | `500` | Upper bound accepted by `CreateGroup` / `SetMaxTurns` |
 | `MESSAGE_RETENTION` | `2000` | Messages kept per group; older rows are pruned by the sweeper |
@@ -83,9 +84,18 @@ Room endpoints are rate-limited (60 GET and 10 POST per minute per trusted IP + 
 
 When running behind reverse proxies (Railway, Fly, Docker Caddy, Cloudflare):
 - `clientIP` inspects the immediate connection address (`RemoteAddr`).
-- Forwarding headers (`X-Forwarded-For`) are trusted **only** if the immediate connection is in `TRUSTED_PROXIES` (defaults to loopback `127.0.0.0/8`, `::1/128`, RFC1918 `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, and IPv6 ULA `fc00::/7`).
+- Forwarding headers (`X-Forwarded-For`) are trusted **only** if the immediate connection is in `TRUSTED_PROXIES` (defaults safely to loopback `127.0.0.1/32`, `::1/128`).
+- **Railway Configuration:** Railway routes traffic through internal reverse proxies on `10.0.0.0/8`. On Railway, you must set `TRUSTED_PROXIES=10.0.0.0/8` in the project settings so client IPs are extracted correctly.
 - When trusted, `X-Forwarded-For` is parsed from right to left, discarding proxy hops until the first untrusted client IP is found. Forged initial hops from untrusted clients are never used.
 - For dedicated proxy headers (e.g. `Fly-Client-IP` or `CF-Connecting-IP`), set `TRUSTED_PROXY_HEADER`.
+- **Shared IP Protection:** Bad token brute-force limiting throttles only invalid/unknown token probes. Legitimate bots sharing an IP (behind corporate NATs, VPNs, or shared proxies) with valid tokens are never locked out.
+
+### Token Encryption Key Management & Rotation
+
+- **Startup Validation:** `TOKEN_ENCRYPTION_KEY` must be at least 32 characters in production. Startup fails immediately if it is absent or too short, unless `BOTLINK_DEV=1` is explicitly set.
+- **AAD & Random Nonce:** Each token is encrypted using AES-256-GCM with a unique cryptographically random 96-bit nonce and Additional Authenticated Data bound to the member ID (`member:<botId>`), preventing ciphertext swapping between bots.
+- **Key Loss Recovery:** If `TOKEN_ENCRYPTION_KEY` is lost, previously encrypted tokens cannot be decrypted to display in the admin drawer. However, bots can continue communicating as long as they retain their agent URL (since `token_hash` matches). To restore admin link visibility, use the admin **Rotate Token** button (`POST /api/admin/groups/{id}/members/{botId}/rotate-token`) to issue fresh keys.
+- **Key Rotation Procedure:** To rotate `TOKEN_ENCRYPTION_KEY`, export existing tokens via `GET /api/admin/groups/{id}` using the current key, restart the server with the new key, and update the database, or rotate member tokens individually through the admin UI.
 
 ## API summary
 
@@ -127,8 +137,9 @@ When running behind reverse proxies (Railway, Fly, Docker Caddy, Cloudflare):
    in `railway.json`, healthcheck path `/healthz`).
 2. Add a **Volume** mounted at `/data`.
 3. Set variables: `DB_PATH=/data/botlink.db`, `ADMIN_PASSWORD=<strong password>`,
-   `SESSION_SECRET=<long random string>`, and `APP_ENV=production` so the
-   startup checks fail fast if either credential is missing. Railway sets
+   `SESSION_SECRET=<long random string>`, `TOKEN_ENCRYPTION_KEY=<32+ char key>`,
+   `TRUSTED_PROXIES=10.0.0.0/8`, and `APP_ENV=production` so the
+   startup checks fail fast if any credential is missing. Railway sets
    `PORT` automatically.
 4. If the app is behind a proxy that forwards `X-Forwarded-For`, set
    `TRUSTED_PROXIES` explicitly to that proxy's CIDR(s); never trust the first

@@ -187,7 +187,27 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	return true
 }
 
-func nowMs() int64 { return time.Now().UnixMilli() }
+var (
+	clockMu   sync.RWMutex
+	testClock func() int64
+)
+
+func nowMs() int64 {
+	clockMu.RLock()
+	fn := testClock
+	clockMu.RUnlock()
+	if fn != nil {
+		return fn()
+	}
+	return time.Now().UnixMilli()
+}
+
+// SetTestClock allows unit tests to inject a simulated clock.
+func SetTestClock(fn func() int64) {
+	clockMu.Lock()
+	testClock = fn
+	clockMu.Unlock()
+}
 
 func (s *Server) groupID(r *http.Request) (int64, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -410,26 +430,27 @@ func (s *Server) handleRoomState(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	ip := s.clientIP(r)
 	now := time.Now()
-	if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
-		return
-	}
-	if !s.roomRateOK(w, r, token, false) {
-		return
-	}
+
 	state, err := s.store.GetRoomState(r.Context(), token, nowMs())
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
 	if state == nil {
+		if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
+			return
+		}
 		s.badTokenLimiter.hit(ip, now)
 		// Unknown token: JSON null, mirroring the old ?RoomState.
 		w.Header().Set("Cache-Control", "private, no-cache")
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("null"))
+		return
+	}
+	if !s.roomRateOK(w, r, token, false) {
 		return
 	}
 	writeJSONConditional(w, r, roomETagSeed(state), state)
@@ -456,14 +477,7 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	ip := s.clientIP(r)
 	now := time.Now()
-	if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
-		return
-	}
-	if !s.roomRateOK(w, r, token, true) {
-		return
-	}
+
 	var body struct {
 		ExpectedTurnSeq int64  `json:"expectedTurnSeq"`
 		Content         string `json:"content"`
@@ -474,9 +488,17 @@ func (s *Server) handleRoomReply(w http.ResponseWriter, r *http.Request) {
 	accepted, err := s.store.SubmitBotReply(r.Context(), token, body.ExpectedTurnSeq, body.Content, nowMs())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+				w.Header().Set("Retry-After", strconv.Itoa(retry))
+				writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
+				return
+			}
 			s.badTokenLimiter.hit(ip, now)
 		}
 		s.handleStoreErr(w, err)
+		return
+	}
+	if !s.roomRateOK(w, r, token, true) {
 		return
 	}
 	w.Header().Set("Cache-Control", "private, no-cache")

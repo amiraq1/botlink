@@ -57,11 +57,12 @@ func main() {
 		secret = []byte(secretStr)
 	}
 
+	devMode := os.Getenv("BOTLINK_DEV") == "1" || os.Getenv("BOTLINK_DEV") == "true"
 	tokenKeyStr := os.Getenv("TOKEN_ENCRYPTION_KEY")
 	var tokenKey []byte
 	if tokenKeyStr == "" {
-		if production {
-			logger.Fatal("TOKEN_ENCRYPTION_KEY is required in production (at least 32 characters)")
+		if !devMode {
+			logger.Fatal("TOKEN_ENCRYPTION_KEY is required (at least 32 characters). Set BOTLINK_DEV=1 to allow dev key derivation.")
 		}
 		if len(secret) >= 32 {
 			tokenKey = secret[:32]
@@ -69,7 +70,7 @@ func main() {
 			h := sha256.Sum256(secret)
 			tokenKey = h[:]
 		}
-		logger.Println("WARNING: TOKEN_ENCRYPTION_KEY is not set — deriving encryption key for development. Set TOKEN_ENCRYPTION_KEY in production.")
+		logger.Println("WARNING: BOTLINK_DEV=1 enabled — deriving development TOKEN_ENCRYPTION_KEY.")
 	} else {
 		if len(tokenKeyStr) < 32 {
 			logger.Fatal("TOKEN_ENCRYPTION_KEY must be at least 32 characters")

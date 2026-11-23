@@ -657,8 +657,8 @@ VALUES (1, 'bot_1', 'Legacy Bot', 'legacy-plain-token-xyz-12345');
 	defer st.Close()
 
 	bakPath := dbPath + ".bak"
-	if _, err := os.Stat(bakPath); err != nil {
-		t.Errorf("expected backup file %s to exist: %v", bakPath, err)
+	if _, err := os.Stat(bakPath); !os.IsNotExist(err) {
+		t.Errorf("expected backup file %s to be deleted after migration, got err: %v", bakPath, err)
 	}
 
 	var agentToken, tokenHash, tokenEnc string

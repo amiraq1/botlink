@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -220,6 +219,8 @@ type presenceTouch struct {
 }
 
 type Store struct {
+	dbPath string
+
 	// db is the single writer connection. All mutations run through
 	// immediateTx on this pool (MaxOpenConns=1), so BEGIN IMMEDIATE never
 	// contends with another writer inside the process.
@@ -301,31 +302,6 @@ func readPoolSize() int {
 	return n
 }
 
-func backupDatabase(path string) error {
-	if path == "" || path == ":memory:" || strings.HasPrefix(path, "file::memory:") {
-		return nil
-	}
-	info, err := os.Stat(path)
-	if err != nil || info.Size() == 0 {
-		return nil
-	}
-	bakPath := path + ".bak"
-	src, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	dst, err := os.Create(bakPath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	_, err = io.Copy(dst, src)
-	return err
-}
-
 // Open creates parent directories, opens (or creates) the SQLite database
 // and applies the schema with WAL mode, foreign keys and a busy timeout.
 // An optional encryption key (at least 32 bytes) can be provided for token encryption.
@@ -335,7 +311,6 @@ func Open(path string, encryptionKey ...[]byte) (*Store, error) {
 			return nil, fmt.Errorf("create db dir: %w", err)
 		}
 	}
-	_ = backupDatabase(path)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -345,6 +320,7 @@ func Open(path string, encryptionKey ...[]byte) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	s := &Store{
+		dbPath:        path,
 		db:            db,
 		presence:      map[string]presenceEntry{},
 		presenceCh:    make(chan presenceTouch, presenceQueueSize),
@@ -653,7 +629,29 @@ func (s *Store) ensureColumn(ctx context.Context, table, col, colDef string) err
 }
 
 func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
-	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM bot_members WHERE agent_token != '' AND token_hash = ''").Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+
+	var bakPath string
+	isMemory := s.dbPath == "" || s.dbPath == ":memory:" || strings.HasPrefix(s.dbPath, "file::memory:")
+	if !isMemory {
+		bakPath = s.dbPath + ".bak"
+		if _, err := os.Stat(bakPath); err == nil {
+			bakPath = fmt.Sprintf("%s.pre_migration_%d.bak", s.dbPath, time.Now().UnixNano())
+		}
+		escaped := strings.ReplaceAll(filepath.ToSlash(bakPath), "'", "''")
+		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("VACUUM INTO '%s'", escaped)); err != nil {
+			return fmt.Errorf("pre-migration backup failed: %w", err)
+		}
+	}
+
+	err := s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
 		rows, err := conn.QueryContext(ctx,
 			"SELECT group_id, bot_id, agent_token FROM bot_members WHERE agent_token != '' AND token_hash = ''")
 		if err != nil {
@@ -681,7 +679,7 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		key := s.key()
 		for _, u := range list {
 			h := HashToken(u.token)
-			enc, err := EncryptToken(key, u.token)
+			enc, err := EncryptToken(key, u.token, MemberAAD(u.botID))
 			if err != nil {
 				return fmt.Errorf("encrypt token for group %d bot %s: %w", u.groupID, u.botID, err)
 			}
@@ -693,6 +691,22 @@ func (s *Store) migrateUnencryptedTokens(ctx context.Context) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+
+	var remaining int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM bot_members WHERE agent_token != ''").Scan(&remaining); err != nil {
+		return err
+	}
+	if remaining != 0 {
+		return fmt.Errorf("migration verification failed: %d plaintext tokens remain", remaining)
+	}
+	if bakPath != "" {
+		_ = os.Remove(bakPath)
+	}
+	return nil
 }
 
 // ctxQuery is a tiny helper so migrate can use QueryContext uniformly.
@@ -895,7 +909,7 @@ func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]M
 		}
 		m.IsMock = isMock != 0
 		if m.TokenEnc != "" && len(key) >= 32 {
-			if dec, err := DecryptToken(key, m.TokenEnc); err == nil {
+			if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.BotID)); err == nil {
 				m.AgentToken = dec
 			}
 		}
@@ -988,7 +1002,7 @@ func loadMemberByToken(ctx context.Context, q querier, token string, key []byte)
 	}
 	m.IsMock = isMock != 0
 	if m.TokenEnc != "" && len(key) >= 32 {
-		if dec, err := DecryptToken(key, m.TokenEnc); err == nil {
+		if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.BotID)); err == nil {
 			m.AgentToken = dec
 		}
 	}
@@ -1148,7 +1162,7 @@ func insertMember(ctx context.Context, q querier, m *Member, plainToken string, 
 		isMock = 1
 	}
 	h := HashToken(plainToken)
-	enc, err := EncryptToken(key, plainToken)
+	enc, err := EncryptToken(key, plainToken, MemberAAD(m.BotID))
 	if err != nil {
 		return err
 	}

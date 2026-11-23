@@ -6,11 +6,11 @@ import (
 	"strings"
 )
 
-// DefaultTrustedProxies covers loopback, RFC1918 and IPv6 ULA, which are the
-// addresses used by Caddy on the same host and by the Fly proxy hop.
+// DefaultTrustedProxies covers loopback only, ensuring safe defaults when
+// TRUSTED_PROXIES is unset. Operators behind reverse proxies (like Railway)
+// must configure TRUSTED_PROXIES explicitly.
 var DefaultTrustedProxies = []string{
-	"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-	"::1/128", "fc00::/7",
+	"127.0.0.1/32", "::1/128",
 }
 
 // ParseCIDRs is exported so the entry point can parse TRUSTED_PROXIES.

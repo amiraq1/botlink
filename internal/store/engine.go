@@ -735,13 +735,17 @@ func (s *Store) RotateToken(ctx context.Context, groupID int64, botID string, no
 		return "", err
 	}
 	h := HashToken(token)
-	enc, err := EncryptToken(s.key(), token)
+	enc, err := EncryptToken(s.key(), token, MemberAAD(botID))
 	if err != nil {
 		return "", err
 	}
 	err = s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		if _, err := loadGroup(ctx, conn, groupID); err != nil {
+		g, err := loadGroup(ctx, conn, groupID)
+		if err != nil {
 			return err
+		}
+		if g.Status == "completed" || g.Status == "stopped" {
+			return wrapErr(ErrValidation, "cannot rotate token for "+g.Status+" group")
 		}
 		res, err := conn.ExecContext(ctx,
 			"UPDATE bot_members SET token_hash = ?, token_enc = ?, agent_token = '' WHERE group_id = ? AND bot_id = ?",

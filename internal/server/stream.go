@@ -25,22 +25,23 @@ func (s *Server) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	ip := s.clientIP(r)
 	now := time.Now()
-	if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
-		w.Header().Set("Retry-After", strconv.Itoa(retry))
-		writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
-		return
-	}
-	if !s.roomRateOK(w, r, token, false) {
-		return
-	}
+
 	groupID, ok, err := s.store.RoomGroupForToken(r.Context(), token)
 	if err != nil {
 		s.handleStoreErr(w, err)
 		return
 	}
 	if !ok {
+		if ok, retry := s.badTokenLimiter.check(ip, now); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			writeError(w, http.StatusTooManyRequests, "too many bad token attempts, try again later")
+			return
+		}
 		s.badTokenLimiter.hit(ip, now)
 		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if !s.roomRateOK(w, r, token, false) {
 		return
 	}
 	s.streamEvents(w, r, groupID, false)
@@ -63,14 +64,19 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request, groupID in
 	w.WriteHeader(http.StatusOK)
 
 	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
 	writeFrame := func(frame string) bool {
 		// Refresh the per-write deadline: this is what lets a stream outlive
-		// the server's 15-second WriteTimeout.
+		// the server's WriteTimeout.
 		_ = rc.SetWriteDeadline(time.Now().Add(streamWriteDeadline))
 		if _, err := w.Write([]byte(frame)); err != nil {
 			return false
 		}
-		return rc.Flush() == nil
+		if err := rc.Flush(); err != nil {
+			return false
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		return true
 	}
 
 	readyFrame := fmt.Sprintf(

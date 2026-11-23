@@ -8,6 +8,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
+*.bak
 /botlink
 # Self-host deployment secrets (see .env.example)
 .env
