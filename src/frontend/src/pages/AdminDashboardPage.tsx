@@ -5,6 +5,11 @@ import { cn } from "@/lib/utils";
 import { MessageSquare, Wrench } from "lucide-react";
 import { useState } from "react";
 
+const TABS = [
+  { id: "groups", label: "المجموعات", icon: MessageSquare },
+  { id: "tools", label: "الأدوات", icon: Wrench },
+] as const;
+
 export default function AdminDashboardPage() {
   const [activeTab, setActiveTab] = useState<"groups" | "tools">("groups");
 
@@ -12,48 +17,55 @@ export default function AdminDashboardPage() {
     <div
       data-ocid="dashboard.page"
       dir="rtl"
-      className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 md:px-6"
+      className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 md:py-8"
     >
-      <div className="flex border-b border-border pb-2">
-        <div className="flex gap-2">
-          <button
-            type="button"
-            data-ocid="dashboard.tab_groups"
-            onClick={() => setActiveTab("groups")}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors",
-              activeTab === "groups"
-                ? "bg-secondary text-foreground shadow-xs"
-                : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground",
-            )}
-          >
-            <MessageSquare className="size-4" />
-            المجموعات
-          </button>
-          <button
-            type="button"
-            data-ocid="dashboard.tab_tools"
-            onClick={() => setActiveTab("tools")}
-            className={cn(
-              "flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors",
-              activeTab === "tools"
-                ? "bg-secondary text-foreground shadow-xs"
-                : "text-muted-foreground hover:bg-secondary/50 hover:text-foreground",
-            )}
-          >
-            <Wrench className="size-4" />
-            الأدوات (Tools)
-          </button>
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-bold text-foreground">
+            لوحة التحكم
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            أنشئ مجموعات البوتات وتابع أدوارها ورسائلها مباشرة.
+          </p>
         </div>
-      </div>
+        <div
+          role="tablist"
+          aria-label="أقسام لوحة التحكم"
+          className="inline-flex w-fit items-center gap-1 rounded-full border border-border bg-surface/70 p-1"
+        >
+          {TABS.map((tab) => {
+            const active = activeTab === tab.id;
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                data-ocid={`dashboard.tab_${tab.id}`}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  "inline-flex h-9 items-center gap-2 rounded-full px-4 text-sm font-semibold transition-[background-color,color,box-shadow] duration-fast ease-out",
+                  active
+                    ? "bg-primary text-primary-foreground shadow-xs"
+                    : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+                )}
+              >
+                <Icon aria-hidden="true" className="size-4" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+      </header>
 
       {activeTab === "groups" ? (
-        <div className="grid gap-6 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)] lg:items-start">
-          <div className="order-2 lg:order-1">
-            <CreateGroupCard />
-          </div>
-          <div className="order-1 lg:order-2">
+        <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(0,26rem)] xl:items-start">
+          <div className="min-w-0">
             <GroupsList />
+          </div>
+          <div className="min-w-0 xl:sticky xl:top-6">
+            <CreateGroupCard />
           </div>
         </div>
       ) : (

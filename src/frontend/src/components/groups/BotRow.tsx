@@ -18,7 +18,7 @@ interface BotRowProps {
 }
 
 const fieldClass =
-  "admin-input h-10 w-full min-w-0 px-4 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring";
+  "h-10 w-full min-w-0 rounded-md border border-border bg-elevated/60 px-3 text-sm text-foreground outline-none transition-[border-color,box-shadow] duration-fast hover:border-border-strong placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/35";
 
 export default function BotRow({
   bot,
@@ -32,16 +32,16 @@ export default function BotRow({
     <li
       data-ocid={`${ocid}.row`}
       className={cn(
-        "rounded-2xl border border-border bg-background/40 p-3",
+        "rounded-lg border border-border-subtle bg-surface/50 p-3",
         accentClass(bot.accentColor, bot.key),
       )}
     >
-      <div className="flex items-start gap-3">
+      <div className="flex items-start gap-2.5">
         <span
           aria-hidden="true"
-          className="avatar-ring mt-0.5 flex size-10 shrink-0 items-center justify-center bg-[oklch(var(--bot-accent))] text-sm font-bold text-background"
+          className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full border border-bot/50 bg-bot-soft text-sm font-bold text-bot"
         >
-          {initialOf(bot.name)}
+          {initialOf(bot.name || "?")}
         </span>
         <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2">
           <input
@@ -69,13 +69,13 @@ export default function BotRow({
           aria-label={`حذف البوت ${bot.name || formatNumberAr(position)}`}
           disabled={!canRemove}
           onClick={onRemove}
-          className="flex size-10 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-destructive/15 hover:text-destructive focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+          className="flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors duration-fast hover:bg-destructive/15 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
         >
           <X aria-hidden="true" className="size-4" />
         </button>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 ps-0 sm:ps-[3.25rem]">
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 sm:ps-[2.9rem]">
         <fieldset className="flex min-w-0 flex-wrap items-center gap-1.5">
           <legend className="sr-only">لون البوت</legend>
           {BOT_ACCENT_PALETTE.map((hex, index) => {
@@ -91,7 +91,7 @@ export default function BotRow({
                 onClick={() => onChange({ accentColor: hex })}
                 className={cn(
                   `accent-${index + 1}`,
-                  "size-6 rounded-full bg-[oklch(var(--bot-accent))] transition-transform hover:scale-110 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+                  "size-6 rounded-full bg-bot transition-transform duration-fast ease-out hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card",
                   selected &&
                     "ring-2 ring-foreground ring-offset-2 ring-offset-card",
                 )}
@@ -101,7 +101,7 @@ export default function BotRow({
         </fieldset>
         <label
           htmlFor={`${bot.key}-mock`}
-          className="flex items-center gap-2 text-sm text-muted-foreground"
+          className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"
         >
           <Switch
             id={`${bot.key}-mock`}
@@ -110,7 +110,7 @@ export default function BotRow({
             onCheckedChange={(checked) => onChange({ isMock: checked })}
             aria-label={`بوت تجريبي ${bot.name || formatNumberAr(position)}`}
           />
-          <span>بوت تجريبي (Mock)</span>
+          <span>بوت تجريبي</span>
         </label>
       </div>
     </li>

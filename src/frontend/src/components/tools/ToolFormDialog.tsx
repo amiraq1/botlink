@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { useCreateTool, useUpdateTool } from "@/hooks/useAdminQueries";
 import type { Tool, ToolInput } from "@/lib/api";
@@ -255,11 +256,12 @@ export default function ToolFormDialog({
             </div>
 
             <div>
-              <label className="block">
+              <label className="block" htmlFor="tool-kind">
                 <span className="mb-1 block text-xs font-semibold text-foreground">
                   نوع الأداة
                 </span>
-                <select
+                <Select
+                  id="tool-kind"
                   disabled={isEditing}
                   value={kind}
                   onChange={(e) =>
@@ -274,7 +276,7 @@ export default function ToolFormDialog({
                   >
                     مدمجة في النظام (Built-in)
                   </option>
-                </select>
+                </Select>
               </label>
             </div>
           </div>

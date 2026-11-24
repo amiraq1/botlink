@@ -135,9 +135,16 @@ export interface RoomState {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Seconds requested by a 429 `Retry-After` header, when the server sends one. */
+  retryAfterSec: number | null;
+  constructor(
+    status: number,
+    message: string,
+    retryAfterSec: number | null = null,
+  ) {
     super(message);
     this.status = status;
+    this.retryAfterSec = retryAfterSec;
   }
 }
 
@@ -162,7 +169,15 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
       typeof data === "object" && data !== null && "error" in data
         ? String((data as { error: unknown }).error)
         : `Request failed (${res.status})`;
-    throw new ApiError(res.status, message);
+    const retryAfter = Number.parseInt(
+      res.headers.get("retry-after") ?? "",
+      10,
+    );
+    throw new ApiError(
+      res.status,
+      message,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null,
+    );
   }
   return data as T;
 }

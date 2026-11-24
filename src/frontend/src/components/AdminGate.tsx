@@ -3,12 +3,14 @@ import LogoutButton from "@/components/LogoutButton";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { authKey, useIsAdmin } from "@/hooks/useAdminQueries";
-import { login } from "@/lib/api";
+import { ApiError, login } from "@/lib/api";
+import { formatNumberAr } from "@/lib/convert";
 import { useQueryClient } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
+import { Bot, Lock, ShieldCheck } from "lucide-react";
 import {
   type FormEvent,
   type ReactNode,
+  useEffect,
   useLayoutEffect,
   useState,
 } from "react";
@@ -39,55 +41,105 @@ function useAdminDocumentMode() {
   }, []);
 }
 
-function CenteredPanel({
+/** Full-bleed dot-grid canvas shared by every standalone admin state. */
+function Canvas({ children }: { children: ReactNode }) {
+  return (
+    <div className="canvas-grid flex min-h-dvh flex-col items-center justify-center px-4 py-10 text-foreground">
+      <div className="flex w-full max-w-sm flex-col items-center gap-6 animate-rise-in">
+        <Brand />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Brand() {
+  return (
+    <div className="flex flex-col items-center gap-2.5">
+      <span className="flex size-12 items-center justify-center rounded-xl bg-gradient-primary text-primary-foreground shadow-glow">
+        <Bot aria-hidden="true" className="size-6" />
+      </span>
+      <span
+        className="font-display text-lg font-bold tracking-[0.18em]"
+        dir="ltr"
+      >
+        BOTLINK
+      </span>
+    </div>
+  );
+}
+
+function Panel({
   ocid,
   title,
   description,
   children,
+  footer,
 }: {
   ocid: string;
   title: string;
   description?: string;
   children?: ReactNode;
+  footer?: ReactNode;
 }) {
   return (
     <section
       data-ocid={ocid}
-      className="admin-canvas flex min-h-dvh flex-col items-center justify-center gap-4 px-6 text-center text-foreground animate-fade-in"
+      className="admin-card w-full px-6 py-7 text-center shadow-lg"
     >
-      <span className="font-display text-3xl font-bold" dir="ltr">
-        BOTLINK
-      </span>
-      <h1 className="text-xl font-semibold">{title}</h1>
-      {description && (
-        <p className="max-w-md text-sm text-muted-foreground">{description}</p>
-      )}
-      {children}
+      <h1 className="font-display text-xl font-bold text-foreground">
+        {title}
+      </h1>
+      {description ? (
+        <p className="mx-auto mt-2 max-w-xs text-sm leading-relaxed text-muted-foreground">
+          {description}
+        </p>
+      ) : null}
+      {children ? <div className="mt-6">{children}</div> : null}
+      {footer ? (
+        <div className="mt-6 border-t border-border-subtle pt-4">{footer}</div>
+      ) : null}
     </section>
   );
 }
 
 function LoadingPanel({ label }: { label: string }) {
   return (
-    <CenteredPanel ocid="auth.loading_state" title={label}>
-      <Loader2
-        aria-hidden="true"
-        className="size-6 animate-spin text-muted-foreground"
-      />
-    </CenteredPanel>
+    <Panel ocid="auth.loading_state" title="لحظة واحدة…">
+      <div className="flex flex-col items-center gap-3 py-2">
+        <span className="size-6 animate-spin rounded-full border-2 border-border-strong border-t-primary" />
+        <p className="text-sm text-muted-foreground">{label}</p>
+      </div>
+    </Panel>
   );
 }
+
+type LoginError = "rate" | "config" | "invalid" | "network";
+
+const RATE_FALLBACK_SEC = 30;
 
 /** Password login for the single admin (ADMIN_PASSWORD on the server). */
 function LoginPrompt() {
   const queryClient = useQueryClient();
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<LoginError | null>(null);
+  const [cooldown, setCooldown] = useState(0);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = window.setTimeout(
+      () => setCooldown((seconds) => Math.max(0, seconds - 1)),
+      1000,
+    );
+    return () => window.clearTimeout(id);
+  }, [cooldown]);
+
+  const locked = pending || cooldown > 0;
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (password.length === 0 || pending) return;
+    if (password.length === 0 || locked) return;
     setPending(true);
     setError(null);
     try {
@@ -95,58 +147,97 @@ function LoginPrompt() {
       setPassword("");
       await queryClient.invalidateQueries({ queryKey: authKey });
     } catch (err) {
-      setError(
-        err instanceof Error && err.message.includes("not configured")
-          ? "تسجيل الدخول غير مفعّل على الخادم: حدّد ADMIN_PASSWORD أولاً."
-          : "كلمة المرور غير صحيحة. حاول مرة أخرى.",
-      );
+      if (err instanceof ApiError && err.status === 429) {
+        setCooldown(err.retryAfterSec ?? RATE_FALLBACK_SEC);
+        setError("rate");
+      } else if (
+        err instanceof Error &&
+        err.message.includes("not configured")
+      ) {
+        setError("config");
+      } else if (err instanceof ApiError) {
+        setError("invalid");
+      } else {
+        setError("network");
+      }
     } finally {
       setPending(false);
     }
   };
 
+  const errorText: string | null =
+    error === "rate"
+      ? cooldown > 0
+        ? `محاولات كثيرة خلال وقت قصير. أعد المحاولة بعد ${formatNumberAr(cooldown)} ثانية.`
+        : "محاولات كثيرة. يمكنك المحاولة الآن مجدداً."
+      : error === "config"
+        ? "تسجيل الدخول غير مفعّل على الخادم: حدّد ADMIN_PASSWORD أولاً."
+        : error === "invalid"
+          ? "كلمة المرور غير صحيحة. حاول مرة أخرى."
+          : error === "network"
+            ? "تعذّر الاتصال بالخادم. تحقق من الشبكة ثم أعد المحاولة."
+            : null;
+
   return (
-    <CenteredPanel
+    <Panel
       ocid="auth.panel"
       title="تسجيل دخول المشرف"
       description="أدخل كلمة مرور المشرف لإدارة مجموعات البوتات ومتابعة محادثاتها."
+      footer={
+        <p className="flex items-center justify-center gap-1.5 text-2xs text-muted-foreground">
+          <ShieldCheck aria-hidden="true" className="size-3.5" />
+          جلسة مشفّرة وقابلة للإبطال من الخادم
+        </p>
+      }
     >
-      <form
-        onSubmit={handleSubmit}
-        className="flex w-full max-w-xs flex-col gap-3"
-      >
-        <Input
-          type="password"
-          dir="ltr"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="كلمة المرور"
-          autoComplete="current-password"
-          aria-label="كلمة مرور المشرف"
-          data-ocid="auth.password_input"
-          disabled={pending}
-          className="admin-input h-12 text-center"
-        />
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <div className="relative">
+          <Lock
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 start-3 my-auto size-4 text-muted-foreground"
+          />
+          <Input
+            type="password"
+            dir="ltr"
+            value={password}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              if (error !== "rate") setError(null);
+            }}
+            placeholder="كلمة المرور"
+            autoComplete="current-password"
+            aria-label="كلمة مرور المشرف"
+            data-ocid="auth.password_input"
+            disabled={locked}
+            aria-invalid={error !== null || undefined}
+            className="h-11 ps-10 text-center"
+          />
+        </div>
         <Button
           type="submit"
           size="lg"
+          loading={pending}
           data-ocid="auth.login_button"
-          className="rounded-full px-8"
-          disabled={pending || password.length === 0}
+          disabled={locked || password.length === 0}
         >
-          {pending ? "جارٍ تسجيل الدخول…" : "تسجيل الدخول"}
+          {cooldown > 0
+            ? `المحاولة بعد ${formatNumberAr(cooldown)} ثانية`
+            : pending
+              ? "جارٍ تسجيل الدخول…"
+              : "تسجيل الدخول"}
         </Button>
       </form>
-      {error && (
+      {errorText ? (
         <p
           role="alert"
+          aria-live="polite"
           data-ocid="auth.error_state"
-          className="text-sm text-destructive"
+          className="mt-4 flex items-start justify-center gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs font-medium text-destructive"
         >
-          {error}
+          {errorText}
         </p>
-      )}
-    </CenteredPanel>
+      ) : null}
+    </Panel>
   );
 }
 
@@ -156,29 +247,38 @@ function AdminCheck({ children }: { children: ReactNode }) {
   if (isLoading || isAdmin === undefined) {
     if (isError) {
       return (
-        <CenteredPanel
-          ocid="auth.error_state"
-          title="تعذّر التحقق من الصلاحية"
-          description="لم يستجب الخادم. تحقق من الاتصال ثم حاول مرة أخرى."
-        >
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              data-ocid="auth.retry_button"
-              className="rounded-full"
-              onClick={() => void refetch()}
-            >
-              إعادة المحاولة
-            </Button>
-            <LogoutButton />
-          </div>
-        </CenteredPanel>
+        <Canvas>
+          <Panel
+            ocid="auth.error_state"
+            title="تعذّر التحقق من الصلاحية"
+            description="لم يستجب الخادم. تحقق من الاتصال ثم حاول مرة أخرى."
+          >
+            <div className="flex flex-col gap-2">
+              <Button
+                type="button"
+                data-ocid="auth.retry_button"
+                onClick={() => void refetch()}
+              >
+                إعادة المحاولة
+              </Button>
+              <LogoutButton />
+            </div>
+          </Panel>
+        </Canvas>
       );
     }
-    return <LoadingPanel label="جارٍ التحقق من الصلاحية…" />;
+    return (
+      <Canvas>
+        <LoadingPanel label="جارٍ التحقق من الصلاحية…" />
+      </Canvas>
+    );
   }
   if (!isAdmin) {
-    return <LoginPrompt />;
+    return (
+      <Canvas>
+        <LoginPrompt />
+      </Canvas>
+    );
   }
   return <Layout>{children}</Layout>;
 }

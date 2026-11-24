@@ -1,9 +1,10 @@
+import { Button } from "@/components/ui/button";
 import { useCreateGroup } from "@/hooks/useAdminQueries";
 import { TurnMode } from "@/lib/api";
 import { numberToBigint, turnModeHintAr, turnModeLabelAr } from "@/lib/convert";
 import { cn } from "@/lib/utils";
 import { useNavigate } from "@tanstack/react-router";
-import { AlertCircle, Loader2, Plus } from "lucide-react";
+import { AlertCircle, AtSign, Plus, Repeat, Users } from "lucide-react";
 import { type FormEvent, useId, useState } from "react";
 import BotsBuilder from "./BotsBuilder";
 import {
@@ -14,9 +15,38 @@ import {
 } from "./botDraft";
 
 const fieldClass =
-  "admin-input h-11 w-full min-w-0 px-4 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring";
+  "admin-input h-11 w-full min-w-0 px-4 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50";
 
-const TURN_MODES = [TurnMode.auto_round_robin, TurnMode.leader_round] as const;
+const TURN_MODES = [
+  { mode: TurnMode.auto_round_robin, icon: Repeat },
+  { mode: TurnMode.leader_round, icon: AtSign },
+] as const;
+
+function SectionHeading({
+  step,
+  title,
+  hint,
+}: {
+  step: number;
+  title: string;
+  hint?: string;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <span className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full border border-primary/30 bg-primary/15 font-mono text-2xs font-bold text-primary">
+        {step}
+      </span>
+      <div className="min-w-0">
+        <h3 className="font-display text-sm font-bold text-foreground">
+          {title}
+        </h3>
+        {hint ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">{hint}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}
 
 export default function CreateGroupCard() {
   const uid = useId();
@@ -77,148 +107,204 @@ export default function CreateGroupCard() {
 
   return (
     <form
+      id="create-group"
       data-ocid="groups.create_form"
       onSubmit={handleSubmit}
-      className="admin-card space-y-5 p-4 sm:p-6"
+      className="admin-card scroll-mt-6 overflow-hidden"
     >
-      <header>
-        <h2 className="font-display text-xl font-bold">إنشاء مجموعة جديدة</h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          حدد البوتات وطريقة تبادل الأدوار ثم ابدأ المحادثة.
-        </p>
+      <header className="flex items-start justify-between gap-3 border-b border-border-subtle bg-surface/40 px-5 py-4">
+        <div>
+          <h2 className="font-display text-base font-bold text-foreground">
+            إنشاء مجموعة جديدة
+          </h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            حدد البوتات وطريقة تبادل الأدوار ثم ابدأ المحادثة.
+          </p>
+        </div>
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/15 text-primary">
+          <Users aria-hidden="true" className="size-4" />
+        </span>
       </header>
 
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <label htmlFor={`${uid}-name`} className="text-sm font-medium">
-            اسم المجموعة
-          </label>
-          <input
-            id={`${uid}-name`}
-            data-ocid="groups.name_input"
-            value={name}
-            maxLength={80}
-            onChange={(e) => setName(e.target.value)}
-            className={fieldClass}
+      <div className="flex flex-col gap-5 p-5">
+        <div className="space-y-3">
+          <SectionHeading
+            step={1}
+            title="تفاصيل المجموعة"
+            hint="اسم واضح وموضوع قصير يساعد البوتات على البقاء في السياق."
           />
-        </div>
-        <div className="space-y-1.5">
-          <label htmlFor={`${uid}-topic`} className="text-sm font-medium">
-            الموضوع
-          </label>
-          <input
-            id={`${uid}-topic`}
-            data-ocid="groups.topic_input"
-            value={topic}
-            maxLength={120}
-            placeholder="مثال: إطلاق النسخة الأولى"
-            onChange={(e) => setTopic(e.target.value)}
-            className={fieldClass}
-          />
-        </div>
-        <div className="space-y-1.5 sm:col-span-2">
-          <label htmlFor={`${uid}-desc`} className="text-sm font-medium">
-            الوصف
-          </label>
-          <textarea
-            id={`${uid}-desc`}
-            data-ocid="groups.description_input"
-            value={description}
-            rows={2}
-            maxLength={300}
-            onChange={(e) => setDescription(e.target.value)}
-            className="admin-input w-full resize-none rounded-2xl px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-          />
-        </div>
-      </div>
-
-      <fieldset className="space-y-2">
-        <legend className="text-sm font-medium">نمط الأدوار</legend>
-        <div className="grid gap-2 sm:grid-cols-2">
-          {TURN_MODES.map((mode) => {
-            const selected = turnMode === mode;
-            return (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
               <label
-                key={mode}
-                data-ocid={`groups.turn_mode.${mode}`}
-                className={cn(
-                  "flex cursor-pointer items-start gap-3 rounded-2xl border p-3 transition-colors focus-within:outline focus-within:outline-2 focus-within:outline-ring",
-                  selected
-                    ? "border-primary bg-primary/10"
-                    : "border-border bg-background/40 hover:bg-secondary",
-                )}
+                htmlFor={`${uid}-name`}
+                className="text-xs font-semibold text-foreground-secondary"
               >
-                <input
-                  type="radio"
-                  name={`${uid}-turn-mode`}
-                  value={mode}
-                  checked={selected}
-                  onChange={() => setTurnMode(mode)}
-                  className="mt-1 size-4 accent-[oklch(var(--primary))]"
-                />
-                <span className="min-w-0">
-                  <span className="block text-sm font-semibold">
+                اسم المجموعة
+              </label>
+              <input
+                id={`${uid}-name`}
+                data-ocid="groups.name_input"
+                value={name}
+                maxLength={80}
+                onChange={(e) => setName(e.target.value)}
+                className={fieldClass}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label
+                htmlFor={`${uid}-topic`}
+                className="text-xs font-semibold text-foreground-secondary"
+              >
+                الموضوع
+              </label>
+              <input
+                id={`${uid}-topic`}
+                data-ocid="groups.topic_input"
+                value={topic}
+                maxLength={120}
+                placeholder="مثال: إطلاق النسخة الأولى"
+                onChange={(e) => setTopic(e.target.value)}
+                className={fieldClass}
+              />
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <label
+                htmlFor={`${uid}-desc`}
+                className="text-xs font-semibold text-foreground-secondary"
+              >
+                الوصف
+              </label>
+              <textarea
+                id={`${uid}-desc`}
+                data-ocid="groups.description_input"
+                value={description}
+                rows={2}
+                maxLength={300}
+                onChange={(e) => setDescription(e.target.value)}
+                className="admin-input w-full resize-none rounded-md px-4 py-2.5 text-sm outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/50"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="h-px bg-border-subtle" />
+
+        <fieldset className="space-y-3">
+          <legend className="sr-only">نمط الأدوار</legend>
+          <SectionHeading
+            step={2}
+            title="نمط الأدوار"
+            hint="اختر كيف يتناوب البوتات على الكتابة."
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            {TURN_MODES.map(({ mode, icon: Icon }) => {
+              const selected = turnMode === mode;
+              return (
+                <label
+                  key={mode}
+                  data-ocid={`groups.turn_mode.${mode}`}
+                  className={cn(
+                    "group relative flex cursor-pointer flex-col gap-2 rounded-lg border p-3 transition-[border-color,background-color,box-shadow] duration-fast ease-out",
+                    selected
+                      ? "border-primary/60 bg-primary/10 shadow-glow"
+                      : "border-border bg-surface/50 hover:border-border-strong hover:bg-secondary",
+                  )}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <Icon
+                      aria-hidden="true"
+                      className={cn(
+                        "size-4",
+                        selected ? "text-primary" : "text-muted-foreground",
+                      )}
+                    />
+                    <input
+                      type="radio"
+                      name={`${uid}-turn-mode`}
+                      value={mode}
+                      checked={selected}
+                      onChange={() => setTurnMode(mode)}
+                      className="size-4 accent-[oklch(var(--primary))]"
+                    />
+                  </span>
+                  <span className="block text-sm font-bold text-foreground">
                     {turnModeLabelAr(mode)}
                   </span>
-                  <span className="block text-xs text-muted-foreground">
+                  <span className="block text-2xs leading-relaxed text-muted-foreground">
                     {turnModeHintAr(mode)}
                   </span>
-                </span>
-              </label>
-            );
-          })}
-        </div>
-      </fieldset>
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
 
-      <div className="max-w-xs space-y-1.5">
-        <label htmlFor={`${uid}-turns`} className="text-sm font-medium">
-          الحد الأقصى للأدوار
-        </label>
-        <input
-          id={`${uid}-turns`}
-          data-ocid="groups.max_turns_input"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={1000}
-          value={maxTurns}
-          onChange={(e) => setMaxTurns(e.target.value)}
-          className={fieldClass}
-          dir="ltr"
+        <div className="space-y-1.5">
+          <label
+            htmlFor={`${uid}-turns`}
+            className="text-xs font-semibold text-foreground-secondary"
+          >
+            الحد الأقصى للأدوار
+          </label>
+          <input
+            id={`${uid}-turns`}
+            data-ocid="groups.max_turns_input"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={1000}
+            value={maxTurns}
+            onChange={(e) => setMaxTurns(e.target.value)}
+            className={cn(fieldClass, "max-w-32 text-center")}
+            dir="ltr"
+          />
+          <p className="text-2xs text-muted-foreground">
+            تتوقف المجموعة تلقائياً عند بلوغ هذا العدد من الأدوار.
+          </p>
+        </div>
+
+        <div className="h-px bg-border-subtle" />
+
+        <SectionHeading
+          step={3}
+          title="أعضاء المجموعة"
+          hint="من ٢ إلى ١٠ بوتات، لكل بوت اسم ودور ولون مميز."
         />
+        <BotsBuilder bots={bots} onChange={setBots} />
+
+        {errorText ? (
+          <div
+            role="alert"
+            data-ocid="groups.create_error_state"
+            className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs font-medium text-destructive"
+          >
+            <AlertCircle
+              aria-hidden="true"
+              className="mt-0.5 size-4 shrink-0"
+            />
+            <span>{errorText}</span>
+          </div>
+        ) : null}
       </div>
 
-      <BotsBuilder bots={bots} onChange={setBots} />
-
-      {errorText ? (
-        <div
-          role="alert"
-          data-ocid="groups.create_error_state"
-          className="flex items-start gap-2 rounded-2xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+      <footer className="border-t border-border-subtle bg-surface/40 p-4">
+        <Button
+          type="submit"
+          size="lg"
+          data-ocid="groups.submit_button"
+          loading={createGroup.isPending}
+          className="w-full"
         >
-          <AlertCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-          <span>{errorText}</span>
-        </div>
-      ) : null}
-
-      <button
-        type="submit"
-        data-ocid="groups.submit_button"
-        disabled={createGroup.isPending}
-        className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-full bg-primary px-6 text-sm font-semibold text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {createGroup.isPending ? (
-          <>
-            <Loader2 aria-hidden="true" className="size-4 animate-spin" />
+          {createGroup.isPending ? (
             <span data-ocid="groups.create_loading_state">جارٍ الإنشاء…</span>
-          </>
-        ) : (
-          <>
-            <Plus aria-hidden="true" className="size-4" />
-            إنشاء المجموعة
-          </>
-        )}
-      </button>
+          ) : (
+            <>
+              <Plus aria-hidden="true" className="size-4" />
+              إنشاء المجموعة
+            </>
+          )}
+        </Button>
+      </footer>
     </form>
   );
 }
