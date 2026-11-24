@@ -16,11 +16,17 @@ export default {
     },
     extend: {
       colors: {
-        border: "oklch(var(--border))",
+        border: "oklch(var(--border) / <alpha-value>)",
+        "border-subtle": "oklch(var(--border-subtle) / <alpha-value>)",
+        "border-strong": "oklch(var(--border-strong) / <alpha-value>)",
         input: "oklch(var(--input))",
         ring: "oklch(var(--ring) / <alpha-value>)",
-        background: "oklch(var(--background))",
-        foreground: "oklch(var(--foreground))",
+        background: "oklch(var(--background) / <alpha-value>)",
+        surface: "oklch(var(--surface) / <alpha-value>)",
+        elevated: "oklch(var(--elevated) / <alpha-value>)",
+        foreground: "oklch(var(--foreground) / <alpha-value>)",
+        "foreground-secondary": "oklch(var(--foreground-secondary) / <alpha-value>)",
+        "foreground-muted": "oklch(var(--foreground-muted) / <alpha-value>)",
         primary: {
           DEFAULT: "oklch(var(--primary) / <alpha-value>)",
           foreground: "oklch(var(--primary-foreground))",
@@ -49,12 +55,16 @@ export default {
           DEFAULT: "oklch(var(--warning) / <alpha-value>)",
           foreground: "oklch(var(--warning-foreground))",
         },
+        info: {
+          DEFAULT: "oklch(var(--info) / <alpha-value>)",
+          foreground: "oklch(var(--info-foreground))",
+        },
         popover: {
-          DEFAULT: "oklch(var(--popover))",
+          DEFAULT: "oklch(var(--popover) / <alpha-value>)",
           foreground: "oklch(var(--popover-foreground))",
         },
         card: {
-          DEFAULT: "oklch(var(--card))",
+          DEFAULT: "oklch(var(--card) / <alpha-value>)",
           foreground: "oklch(var(--card-foreground))",
         },
         chart: {
@@ -80,17 +90,47 @@ export default {
         body: ["var(--font-body)", "sans-serif"],
         mono: ["var(--font-mono)", "monospace"],
       },
+      fontSize: {
+        "2xs": ["var(--text-2xs)", { lineHeight: "1.5" }],
+        xs: ["var(--text-xs)", { lineHeight: "1.6" }],
+        sm: ["var(--text-sm)", { lineHeight: "1.6" }],
+        base: ["var(--text-base)", { lineHeight: "1.7" }],
+        md: ["var(--text-md)", { lineHeight: "1.65" }],
+        lg: ["var(--text-lg)", { lineHeight: "1.5" }],
+        xl: ["var(--text-xl)", { lineHeight: "1.4" }],
+        "2xl": ["var(--text-2xl)", { lineHeight: "1.3" }],
+        "3xl": ["var(--text-3xl)", { lineHeight: "1.25" }],
+        "4xl": ["var(--text-4xl)", { lineHeight: "1.2" }],
+      },
       borderRadius: {
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        sm: "var(--radius-sm)",
+        DEFAULT: "var(--radius-md)",
+        md: "var(--radius-md)",
+        lg: "var(--radius-lg)",
+        xl: "var(--radius-xl)",
+        "2xl": "var(--radius-xl)",
+        full: "var(--radius-full)",
       },
       boxShadow: {
-        xs: "0 1px 2px 0 rgba(0,0,0,0.05)",
-        subtle: "0 1px 0 0 rgba(20,24,45,0.04), 0 1px 3px 0 rgba(20,24,45,0.06)",
-        elevated: "0 4px 14px -2px rgba(20,24,45,0.10), 0 2px 4px -2px rgba(20,24,45,0.06)",
-        "dark-card": "0 1px 0 0 rgba(255,255,255,0.03) inset, 0 8px 24px -8px rgba(0,0,0,0.55)",
-        "dark-float": "0 -8px 24px -12px rgba(0,0,0,0.6)",
+        xs: "var(--shadow-xs)",
+        sm: "var(--shadow-sm)",
+        DEFAULT: "var(--shadow-sm)",
+        md: "var(--shadow-md)",
+        lg: "var(--shadow-lg)",
+        xl: "var(--shadow-xl)",
+        glow: "var(--shadow-glow)",
+        subtle: "var(--shadow-sm)",
+        elevated: "var(--shadow-md)",
+        "dark-card": "var(--shadow-sm)",
+        "dark-float": "var(--shadow-lg)",
+      },
+      transitionTimingFunction: {
+        out: "var(--ease-out)",
+      },
+      transitionDuration: {
+        fast: "var(--duration-fast)",
+        base: "var(--duration-base)",
+        slow: "var(--duration-slow)",
       },
       keyframes: {
         "fade-in": {
@@ -98,8 +138,12 @@ export default {
           to: { opacity: "1" },
         },
         "rise-in": {
-          from: { opacity: "0", transform: "translateY(6px)" },
+          from: { opacity: "0", transform: "translateY(8px)" },
           to: { opacity: "1", transform: "translateY(0)" },
+        },
+        "message-in": {
+          from: { opacity: "0", transform: "translateY(6px) scale(0.99)" },
+          to: { opacity: "1", transform: "translateY(0) scale(1)" },
         },
         "pulse-dot": {
           "0%, 100%": { opacity: "1", transform: "scale(1)" },
@@ -108,6 +152,9 @@ export default {
         "typing-dot": {
           "0%, 60%, 100%": { transform: "translateY(0)", opacity: "0.4" },
           "30%": { transform: "translateY(-3px)", opacity: "1" },
+        },
+        shimmer: {
+          "100%": { transform: "translateX(-100%)" },
         },
         "accordion-down": {
           from: { height: "0" },
@@ -121,10 +168,12 @@ export default {
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
-        "fade-in": "fade-in 0.2s ease-out both",
-        "rise-in": "rise-in 0.25s ease-out both",
+        "fade-in": "fade-in var(--duration-base) var(--ease-out) both",
+        "rise-in": "rise-in var(--duration-slow) var(--ease-out) both",
+        "message-in": "message-in var(--duration-slow) var(--ease-out) both",
         "pulse-dot": "pulse-dot 1.6s ease-in-out infinite",
         "typing-dot": "typing-dot 1.2s ease-in-out infinite",
+        shimmer: "shimmer 1.6s ease-in-out infinite",
       },
     },
   },

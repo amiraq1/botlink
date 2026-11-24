@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+/* --------------------------------------------------------------------------
+   Locally hosted fonts (no CDN requests — CSP safe).
+   Latin glyphs use Space Grotesk / Figtree; Arabic glyphs are served by a
+   bundled IBM Plex Sans Arabic subset.
+   -------------------------------------------------------------------------- */
 @font-face {
   font-family: "Space Grotesk";
   src: url("/assets/fonts/SpaceGrotesk.woff2") format("woff2");
@@ -42,166 +47,72 @@
 }
 
 @layer base {
-  :root {
-    /* Latin glyphs keep their bundled fonts; Arabic glyphs are served by a
-       locally hosted IBM Plex Sans Arabic subset (no external requests). */
-    --font-display: "Space Grotesk", "IBM Plex Sans Arabic", "Segoe UI", Tahoma,
-      "Noto Sans Arabic", ui-sans-serif, system-ui, sans-serif;
-    --font-body: "Figtree", "IBM Plex Sans Arabic", "Segoe UI", Tahoma,
-      "Noto Sans Arabic", ui-sans-serif, system-ui, sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, monospace;
-    --radius: 0.75rem;
-    --radius-bubble: 18px;
-
-    /* ---- Public / agent room: plain, high-contrast light ---- */
-    --background: 1 0 0;
-    --foreground: 0.13 0.01 262;
-    --card: 1 0 0;
-    --card-foreground: 0.13 0.01 262;
-    --popover: 1 0 0;
-    --popover-foreground: 0.13 0.01 262;
-
-    --primary: 0.5 0.22 262;
-    --primary-foreground: 0.99 0 0;
-
-    --secondary: 0.95 0.008 255;
-    --secondary-foreground: 0.25 0.03 262;
-    --muted: 0.955 0.006 255;
-    --muted-foreground: 0.42 0.02 262;
-
-    --accent: 0.94 0.04 262;
-    --accent-foreground: 0.3 0.15 262;
-
-    --destructive: 0.52 0.23 27;
-    --destructive-foreground: 0.99 0 0;
-
-    --success: 0.48 0.14 155;
-    --success-foreground: 0.99 0 0;
-    --warning: 0.82 0.16 82;
-    --warning-foreground: 0.25 0.06 70;
-
-    --border: 0.88 0.008 255;
-    --input: 0.6 0.012 255;
-    --ring: 0.5 0.22 262;
-
-    --chart-1: 0.5 0.22 262;
-    --chart-2: 0.6 0.14 160;
-    --chart-3: 0.78 0.16 82;
-    --chart-4: 0.58 0.22 27;
-    --chart-5: 0.55 0.03 262;
-
-    --sidebar: 1 0 0;
-    --sidebar-foreground: 0.13 0.01 262;
-    --sidebar-primary: 0.5 0.22 262;
-    --sidebar-primary-foreground: 0.99 0 0;
-    --sidebar-accent: 0.94 0.04 262;
-    --sidebar-accent-foreground: 0.3 0.15 262;
-    --sidebar-border: 0.92 0.008 255;
-    --sidebar-ring: 0.5 0.22 262;
-
-    /* ---- Admin messenger tokens (valid in any scope) ---- */
-    --bubble-bot: 0.275 0.025 268; /* #232733 */
-    --bubble-bot-foreground: 0.96 0.005 255;
-    --bubble-leader: 0.58 0.215 262; /* #1D6BFF */
-    --bubble-leader-foreground: 0.99 0 0;
-
-    /* Per-bot accents (avatar rings, name labels, mention chips) */
-    --bot-1: 0.62 0.19 259; /* #3B82F6 blue */
-    --bot-2: 0.63 0.23 303; /* #A855F7 violet */
-    --bot-3: 0.66 0.23 355; /* #EC4899 pink */
-    --bot-4: 0.7 0.15 163; /* #10B981 green */
-    --bot-5: 0.78 0.16 75; /* amber */
-    --bot-6: 0.75 0.13 205; /* cyan */
-    --bot-7: 0.68 0.21 35; /* orange-red */
-    --bot-8: 0.78 0.17 125; /* lime */
-    --bot-9: 0.68 0.16 190; /* teal */
-    --bot-10: 0.7 0.14 330; /* orchid */
-    --bot-accent: var(--bot-1);
-
-    --gradient-primary: linear-gradient(
-      135deg,
-      oklch(0.6 0.22 268),
-      oklch(0.55 0.22 255)
-    );
-    --transition-smooth: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  }
-
-  /* Admin shell: dark Telegram/Messenger look.
-     Apply `dark` (or `admin-shell`) on <html> while an /admin route is mounted
-     so portals (drawer, dropdowns, toasts) inherit it; remove it on /a/:token. */
-  .dark,
-  .admin-shell {
-    color-scheme: dark;
-
-    --background: 0.175 0.011 268; /* #0B0D12 */
-    --foreground: 0.96 0.005 255;
-    --card: 0.205 0.019 267; /* #141720 */
-    --card-foreground: 0.96 0.005 255;
-    --popover: 0.225 0.02 267;
-    --popover-foreground: 0.96 0.005 255;
-
-    --primary: 0.58 0.215 262; /* #1D6BFF */
-    --primary-foreground: 0.99 0 0;
-
-    --secondary: 0.275 0.025 268; /* #232733 */
-    --secondary-foreground: 0.9 0.01 255;
-    --muted: 0.245 0.022 268;
-    --muted-foreground: 0.72 0.02 262;
-
-    --accent: 0.3 0.06 262;
-    --accent-foreground: 0.93 0.04 262;
-
-    --destructive: 0.66 0.21 25;
-    --destructive-foreground: 0.14 0.015 262;
-
-    --success: 0.72 0.16 160;
-    --success-foreground: 0.14 0.015 262;
-    --warning: 0.82 0.16 82;
-    --warning-foreground: 0.2 0.04 70;
-
-    --border: 0.3 0.02 267;
-    --input: 0.34 0.025 267;
-    --ring: 0.62 0.19 259;
-
-    --chart-1: 0.62 0.19 259;
-    --chart-2: 0.63 0.23 303;
-    --chart-3: 0.66 0.23 355;
-    --chart-4: 0.7 0.15 163;
-    --chart-5: 0.78 0.16 75;
-
-    --sidebar: 0.205 0.019 267;
-    --sidebar-foreground: 0.96 0.005 255;
-    --sidebar-primary: 0.58 0.215 262;
-    --sidebar-primary-foreground: 0.99 0 0;
-    --sidebar-accent: 0.275 0.025 268;
-    --sidebar-accent-foreground: 0.96 0.005 255;
-    --sidebar-border: 0.3 0.02 267;
-    --sidebar-ring: 0.62 0.19 259;
-  }
-
   * {
     @apply border-border;
   }
-  body {
-    @apply bg-background text-foreground font-body antialiased;
-  }
-  h1,
-  h2,
-  h3 {
-    font-family: var(--font-display);
-    letter-spacing: -0.02em;
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
   }
 
-  /* Arabic joins letters: never apply tracking in RTL contexts */
+  body {
+    @apply bg-background font-body text-foreground antialiased;
+    font-size: var(--text-base);
+    line-height: var(--leading-normal);
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.01em;
+    line-height: var(--leading-tight);
+  }
+
+  /* Arabic script joins letters: never apply tracking in RTL contexts. */
   [dir="rtl"],
   [dir="rtl"] h1,
   [dir="rtl"] h2,
   [dir="rtl"] h3,
+  [dir="rtl"] h4,
   [dir="rtl"] [class*="tracking-"] {
     letter-spacing: 0;
   }
+
   [dir="rtl"] {
-    line-height: 1.7;
+    line-height: var(--leading-relaxed);
+  }
+
+  /* One visible, consistent focus ring across every interactive element. */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    outline: 2px solid oklch(var(--ring));
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background-color: oklch(var(--primary) / 0.35);
+    color: oklch(var(--foreground));
+  }
+
+  /* Numeric fields keep Latin digits so counters stay unambiguous. */
+  input[type="number"] {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Respect the OS reduced-motion preference everywhere. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
@@ -212,6 +123,11 @@
   .bg-gradient-primary {
     background-image: var(--gradient-primary);
   }
+  .text-gradient-primary {
+    background-image: var(--gradient-primary);
+    background-clip: text;
+    color: transparent;
+  }
   .bg-success {
     background-color: oklch(var(--success));
   }
@@ -221,11 +137,17 @@
   .bg-warning {
     background-color: oklch(var(--warning));
   }
+  .text-warning {
+    color: oklch(var(--warning));
+  }
   .text-warning-foreground {
     color: oklch(var(--warning-foreground));
   }
   .border-warning {
     border-color: oklch(var(--warning));
+  }
+  .text-info {
+    color: oklch(var(--info));
   }
   .bg-warning-soft {
     background-color: oklch(var(--warning) / 0.16);
@@ -237,14 +159,42 @@
     background-color: oklch(var(--destructive) / 0.1);
   }
   .bg-primary-soft {
-    background-color: oklch(var(--primary) / 0.1);
+    background-color: oklch(var(--primary) / 0.12);
   }
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: oklch(var(--border)) transparent;
+    scrollbar-color: oklch(var(--border-strong)) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: oklch(var(--border-strong));
+    border-radius: var(--radius-full);
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
   }
 
-  /* ---------- Admin messenger: bubbles ---------- */
+  /* ---------- Ambient canvas: dot grid + soft accent glow ---------- */
+  .canvas-grid {
+    background-color: oklch(var(--background));
+    background-image: radial-gradient(
+        70rem 34rem at 85% -12%,
+        oklch(var(--primary) / 0.12),
+        transparent 62%
+      ),
+      radial-gradient(
+        50rem 28rem at 5% 105%,
+        oklch(var(--info) / 0.08),
+        transparent 60%
+      ), radial-gradient(oklch(var(--foreground) / 0.055) 1px, transparent 1px);
+    background-size: auto, auto, 22px 22px;
+    background-position: center, center, 0 0;
+  }
+
+  /* ---------- Messenger: bubbles ---------- */
   .rounded-bubble {
     border-radius: var(--radius-bubble);
   }
@@ -252,6 +202,8 @@
     background-color: oklch(var(--bubble-bot));
     color: oklch(var(--bubble-bot-foreground));
     border-radius: var(--radius-bubble);
+    border: 1px solid oklch(var(--border) / 0.7);
+    box-shadow: var(--shadow-xs);
   }
   /* Long streams (up to 500 messages): skip layout/paint for offscreen rows. */
   .msg-row {
@@ -262,18 +214,19 @@
     background-color: oklch(var(--bubble-leader));
     color: oklch(var(--bubble-leader-foreground));
     border-radius: var(--radius-bubble);
+    box-shadow: 0 6px 20px -10px oklch(var(--primary) / 0.7);
   }
   /* Messenger "tail": flatten the corner nearest the avatar (logical = RTL safe) */
   .bubble-tail {
     border-start-start-radius: 6px;
   }
   .bubble-system {
-    background-color: oklch(var(--muted) / 0.6);
+    background-color: oklch(var(--muted) / 0.8);
     color: oklch(var(--muted-foreground));
-    border-radius: 999px;
+    border-radius: var(--radius-full);
   }
 
-  /* ---------- Per-bot accent scope: add .accent-N to a row/bubble/avatar ---------- */
+  /* ---------- Per-bot accent scope ---------- */
   .accent-1 {
     --bot-accent: var(--bot-1);
   }
@@ -319,89 +272,108 @@
   }
   /* Glowing avatar ring: gap in surface colour, accent ring, soft halo */
   .avatar-ring {
-    border-radius: 9999px;
-    box-shadow: 0 0 0 2px oklch(var(--background)), 0 0 0 4px
-      oklch(var(--bot-accent)), 0 0 14px 2px oklch(var(--bot-accent) / 0.45);
+    border-radius: var(--radius-full);
+    box-shadow: 0 0 0 2px oklch(var(--surface)), 0 0 0 4px
+      oklch(var(--bot-accent)), 0 0 14px 2px oklch(var(--bot-accent) / 0.4);
   }
   .avatar-ring-offline {
-    border-radius: 9999px;
-    box-shadow: 0 0 0 2px oklch(var(--background)), 0 0 0 4px
-      oklch(var(--bot-accent) / 0.3);
+    border-radius: var(--radius-full);
+    box-shadow: 0 0 0 2px oklch(var(--surface)), 0 0 0 3px
+      oklch(var(--bot-accent) / 0.26);
     filter: saturate(0.5);
   }
   .avatar-ring-live {
-    animation: ring-glow 2.2s ease-in-out infinite;
+    animation: ring-glow 2.4s ease-in-out infinite;
   }
   /* Mention chip in the composer */
   .mention-chip {
     display: inline-flex;
     align-items: center;
-    gap: 0.35rem;
-    padding: 0.25rem 0.7rem;
-    border-radius: 9999px;
-    font-size: 0.8125rem;
+    gap: var(--space-1-5);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-full);
+    font-size: var(--text-xs);
     font-weight: 600;
     white-space: nowrap;
     color: oklch(var(--bot-accent));
-    background-color: oklch(var(--bot-accent) / 0.14);
-    border: 1px solid oklch(var(--bot-accent) / 0.4);
+    background-color: oklch(var(--bot-accent) / 0.12);
+    border: 1px solid oklch(var(--bot-accent) / 0.38);
     transition: var(--transition-smooth);
   }
   .mention-chip:hover {
-    background-color: oklch(var(--bot-accent) / 0.26);
+    background-color: oklch(var(--bot-accent) / 0.24);
+    border-color: oklch(var(--bot-accent) / 0.6);
   }
 
-  /* ---------- Admin zones ---------- */
+  /* ---------- Surfaces ---------- */
   .admin-topbar {
-    background-color: oklch(var(--card) / 0.92);
-    backdrop-filter: blur(12px);
+    background-color: oklch(var(--surface) / 0.85);
+    backdrop-filter: blur(16px) saturate(140%);
     border-bottom: 1px solid oklch(var(--border));
   }
   .admin-statusbar {
-    background-color: oklch(var(--card));
+    background-color: oklch(var(--surface) / 0.72);
     border-top: 1px solid oklch(var(--border));
   }
   .admin-composer {
-    background-color: oklch(var(--card));
+    background-color: oklch(var(--surface));
     border-top: 1px solid oklch(var(--border));
-    padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+    padding-bottom: max(var(--space-3), env(safe-area-inset-bottom));
   }
   .admin-card {
     background-color: oklch(var(--card));
     border: 1px solid oklch(var(--border));
-    border-radius: var(--radius-bubble);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+  }
+  .admin-panel {
+    background-color: oklch(var(--surface));
+    border: 1px solid oklch(var(--border));
+    border-radius: var(--radius-lg);
   }
   .admin-input {
-    background-color: oklch(var(--secondary));
+    background-color: oklch(var(--elevated) / 0.6);
     border: 1px solid oklch(var(--border));
-    border-radius: 9999px;
+    border-radius: var(--radius-full);
     color: oklch(var(--foreground));
+    transition: var(--transition-smooth);
+  }
+  .admin-input:hover:not(:disabled) {
+    border-color: oklch(var(--border-strong));
   }
   .admin-canvas {
     background-color: oklch(var(--background));
-    background-image: radial-gradient(
-      60rem 30rem at 50% -10%,
-      oklch(var(--primary) / 0.08),
-      transparent 70%
-    );
+    background-image: var(--gradient-surface);
+  }
+  /* Mono blocks for agent links and ready prompts */
+  .code-block {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.7;
+    background-color: oklch(var(--background) / 0.7);
+    border: 1px solid oklch(var(--border));
+    border-radius: var(--radius-md);
+    padding: var(--space-2-5) var(--space-3);
+    word-break: break-all;
+    color: oklch(var(--foreground-secondary));
   }
 
   /* ---------- Agent room: plain ink-on-white ---------- */
   .agent-box {
     border: 2px solid oklch(var(--foreground));
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     background-color: oklch(var(--background));
     color: oklch(var(--foreground));
   }
   .agent-box-quote {
     border: 2px solid oklch(var(--warning));
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     background-color: oklch(var(--warning) / 0.16);
     color: oklch(var(--foreground));
   }
   .agent-label {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: var(--text-xs);
     font-weight: 700;
     letter-spacing: 0.14em;
     text-transform: uppercase;
@@ -410,12 +382,12 @@
   @keyframes ring-glow {
     0%,
     100% {
-      box-shadow: 0 0 0 2px oklch(var(--background)), 0 0 0 4px
-        oklch(var(--bot-accent)), 0 0 10px 1px oklch(var(--bot-accent) / 0.35);
+      box-shadow: 0 0 0 2px oklch(var(--surface)), 0 0 0 4px
+        oklch(var(--bot-accent)), 0 0 10px 1px oklch(var(--bot-accent) / 0.3);
     }
     50% {
-      box-shadow: 0 0 0 2px oklch(var(--background)), 0 0 0 4px
-        oklch(var(--bot-accent)), 0 0 20px 4px oklch(var(--bot-accent) / 0.6);
+      box-shadow: 0 0 0 2px oklch(var(--surface)), 0 0 0 4px
+        oklch(var(--bot-accent)), 0 0 20px 4px oklch(var(--bot-accent) / 0.55);
     }
   }
 }
