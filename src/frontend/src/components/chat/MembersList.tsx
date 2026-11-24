@@ -1,6 +1,9 @@
 import BotAvatar from "@/components/chat/BotAvatar";
 import CopyButton from "@/components/chat/CopyButton";
 import MemberToolsSection from "@/components/chat/MemberToolsSection";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
 import {
   useGroupMemberTools,
   useRemoveMember,
@@ -10,10 +13,54 @@ import {
 import type { MemberView } from "@/lib/api";
 import { buildAgentPrompt, buildAgentUrl, isMemberOnline } from "@/lib/convert";
 import { cn } from "@/lib/utils";
-import { RefreshCw, Trash2, Wrench } from "lucide-react";
+import {
+  AlertTriangle,
+  Link2,
+  RefreshCw,
+  ScrollText,
+  Trash2,
+  Wrench,
+} from "lucide-react";
 import { useState } from "react";
 
 const MIN_MEMBERS = 2;
+
+function CodeRow({
+  label,
+  icon,
+  value,
+  copyLabel,
+  ocid,
+  maxHeight,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  value: string;
+  copyLabel: string;
+  ocid: string;
+  maxHeight?: string;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1 text-2xs font-semibold text-muted-foreground">
+          {icon}
+          {label}
+        </span>
+        <CopyButton label={copyLabel} text={value} ocid={ocid} compact />
+      </div>
+      <p
+        dir="ltr"
+        className={cn(
+          "code-block scrollbar-thin overflow-y-auto text-start",
+          maxHeight,
+        )}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
 
 export default function MembersList({
   groupId,
@@ -24,6 +71,7 @@ export default function MembersList({
 }) {
   const remove = useRemoveMember();
   const rotate = useRotateMemberToken();
+  const { toast } = useToast();
   const { data: allTools = [] } = useTools();
   const { data: memberTools = [] } = useGroupMemberTools(groupId);
 
@@ -40,7 +88,6 @@ export default function MembersList({
           const online = isMemberOnline(m);
           const url = buildAgentUrl(m.agentToken);
 
-          // Get enabled tools for this specific member
           const botAssignedTools = memberTools.filter(
             (mt) => mt.botId === m.botId && mt.enabled,
           );
@@ -55,43 +102,55 @@ export default function MembersList({
               (x): x is { name: string; description: string } => x !== null,
             );
 
+          const confirming = confirmingBotId === m.botId;
+
           return (
             <li
               key={m.botId}
               data-ocid={`groupinfo.member.${i + 1}`}
-              className="admin-card flex flex-col gap-3 p-3"
+              className={cn(
+                "rounded-lg border bg-surface/50 p-3",
+                confirming ? "border-destructive/50" : "border-border-subtle",
+              )}
             >
-              <div className="flex items-center gap-3">
+              <div className="flex items-start gap-2.5">
                 <BotAvatar
                   name={m.name}
                   accentColor={m.accentColor}
                   state={online ? "live" : "offline"}
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-bold">
+                  <p className="flex items-center gap-1.5 truncate text-sm font-bold text-foreground">
                     <bdi>{m.name}</bdi>
+                    {m.isMock ? (
+                      <Badge tone="muted" size="sm">
+                        تجريبي
+                      </Badge>
+                    ) : null}
                   </p>
-                  <p className="truncate text-xs text-muted-foreground">
-                    <bdi>{m.roleTitle}</bdi>
-                    {m.isMock ? " · تجريبي" : ""}
+                  <p className="truncate text-2xs text-muted-foreground">
+                    <bdi>{m.roleTitle || "بدون دور محدد"}</bdi>
                   </p>
                   <p
                     className={cn(
-                      "mt-0.5 flex items-center gap-1.5 text-xs",
+                      "mt-1 flex items-center gap-1.5 text-2xs",
                       online ? "text-success" : "text-muted-foreground",
                     )}
                   >
                     <span
+                      aria-hidden="true"
                       className={cn(
-                        "size-2 rounded-full",
-                        online ? "bg-success" : "bg-muted-foreground",
+                        "size-1.5 rounded-full",
+                        online ? "bg-success" : "bg-muted-foreground/50",
                       )}
                     />
                     {online ? "متصل الآن" : "غير متصل"}
                   </p>
                 </div>
-                <button
+                <Button
                   type="button"
+                  variant="ghost"
+                  size="icon-sm"
                   data-ocid={`groupinfo.remove_member_button.${i + 1}`}
                   onClick={() => remove.mutate({ groupId, botId: m.botId })}
                   disabled={!canRemove || remove.isPending}
@@ -101,89 +160,127 @@ export default function MembersList({
                       : "يجب أن تضم المجموعة عضوين على الأقل"
                   }
                   aria-label={`إزالة ${m.name}`}
-                  className="inline-flex min-h-9 shrink-0 items-center gap-1.5 rounded-full border border-destructive/40 px-3 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-40"
+                  className="text-muted-foreground hover:bg-destructive/15 hover:text-destructive"
                 >
-                  <Trash2 aria-hidden="true" className="size-3.5" />
-                  إزالة
-                </button>
+                  <Trash2 aria-hidden="true" className="size-4" />
+                </Button>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <CopyButton
-                  label="نسخ الرابط"
-                  text={url}
+
+              <div className="mt-3 space-y-2.5">
+                <CodeRow
+                  label="رابط الوكيل"
+                  icon={<Link2 aria-hidden="true" className="size-3" />}
+                  value={url}
+                  copyLabel="نسخ الرابط"
                   ocid={`groupinfo.copy_url_button.${i + 1}`}
                 />
-                <CopyButton
-                  label="نسخ التوجيه الجاهز"
-                  text={buildAgentPrompt(url, activeTools)}
+                <CodeRow
+                  label="التوجيه الجاهز"
+                  icon={<ScrollText aria-hidden="true" className="size-3" />}
+                  value={buildAgentPrompt(url, activeTools)}
+                  copyLabel="نسخ التوجيه الجاهز"
                   ocid={`groupinfo.copy_prompt_button.${i + 1}`}
+                  maxHeight="max-h-24"
                 />
-                <button
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                <Button
                   type="button"
+                  variant="secondary"
+                  size="sm"
                   data-ocid={`groupinfo.toggle_tools_button.${i + 1}`}
+                  aria-expanded={expandedToolsBotId === m.botId}
                   onClick={() =>
                     setExpandedToolsBotId(
                       expandedToolsBotId === m.botId ? null : m.botId,
                     )
                   }
                   className={cn(
-                    "inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring",
-                    expandedToolsBotId === m.botId
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-secondary hover:bg-accent",
+                    "border",
+                    expandedToolsBotId === m.botId &&
+                      "border-primary/40 bg-primary/10 text-primary",
                   )}
                 >
                   <Wrench aria-hidden="true" className="size-3.5" />
                   الأدوات ({activeTools.length})
-                </button>
-                {confirmingBotId === m.botId ? (
-                  <>
-                    <button
-                      type="button"
-                      data-ocid={`groupinfo.confirm_rotate_button.${i + 1}`}
-                      disabled={rotate.isPending}
-                      onClick={() =>
-                        rotate.mutate(
-                          { groupId, botId: m.botId },
-                          { onSuccess: () => setConfirmingBotId(null) },
-                        )
-                      }
-                      className="inline-flex min-h-9 items-center gap-1.5 rounded-full bg-destructive px-3 text-xs font-semibold text-destructive-foreground transition-colors hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
-                    >
-                      تأكيد التدوير — الرابط القديم يتوقف
-                    </button>
-                    <button
-                      type="button"
-                      data-ocid={`groupinfo.cancel_rotate_button.${i + 1}`}
-                      disabled={rotate.isPending}
-                      onClick={() => setConfirmingBotId(null)}
-                      className="inline-flex min-h-9 items-center rounded-full border border-border bg-secondary px-3 text-xs font-semibold transition-colors hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50"
-                    >
-                      إلغاء
-                    </button>
-                  </>
-                ) : (
-                  <button
+                </Button>
+                {confirming ? (
+                  <Button
                     type="button"
+                    variant="ghost"
+                    size="sm"
+                    data-ocid={`groupinfo.cancel_rotate_button.${i + 1}`}
+                    disabled={rotate.isPending}
+                    onClick={() => setConfirmingBotId(null)}
+                  >
+                    إلغاء
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
                     data-ocid={`groupinfo.rotate_token_button.${i + 1}`}
                     onClick={() => setConfirmingBotId(m.botId)}
-                    className="inline-flex min-h-9 items-center gap-1.5 rounded-full border border-border bg-secondary px-3 text-xs font-semibold transition-colors hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
                   >
                     <RefreshCw aria-hidden="true" className="size-3.5" />
                     تدوير الرابط
-                  </button>
+                  </Button>
                 )}
               </div>
-              {expandedToolsBotId === m.botId && (
-                <div className="mt-1">
+
+              {confirming ? (
+                <div
+                  data-ocid={`groupinfo.rotate_warning.${i + 1}`}
+                  className="mt-2.5 space-y-2 rounded-md border border-destructive/35 bg-destructive/10 p-3"
+                >
+                  <p className="flex items-start gap-1.5 text-2xs font-medium leading-relaxed text-destructive">
+                    <AlertTriangle
+                      aria-hidden="true"
+                      className="mt-0.5 size-3.5 shrink-0"
+                    />
+                    سيتم إبطال الرابط الحالي فوراً، وسيتوقف أي وكيل يستخدمه عن
+                    العمل حتى تحصل على الرابط الجديد.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="danger"
+                    size="sm"
+                    data-ocid={`groupinfo.confirm_rotate_button.${i + 1}`}
+                    loading={rotate.isPending}
+                    onClick={() =>
+                      rotate.mutate(
+                        { groupId, botId: m.botId },
+                        {
+                          onSuccess: () => {
+                            setConfirmingBotId(null);
+                            toast({
+                              tone: "success",
+                              title: "تم تدوير الرابط",
+                              description: `أصبح رابط ${m.name} الجديد جاهزاً للنسخ.`,
+                            });
+                          },
+                        },
+                      )
+                    }
+                  >
+                    تأكيد التدوير
+                  </Button>
+                </div>
+              ) : null}
+
+              {expandedToolsBotId === m.botId ? (
+                <div className="mt-3 border-t border-border-subtle pt-3">
                   <MemberToolsSection groupId={groupId} botId={m.botId} />
                 </div>
-              )}
-              {rotate.isError && confirmingBotId === m.botId ? (
+              ) : null}
+
+              {rotate.isError && confirming ? (
                 <p
                   role="alert"
                   data-ocid={`groupinfo.rotate_error_state.${i + 1}`}
-                  className="text-xs text-destructive"
+                  className="mt-2 text-2xs text-destructive"
                 >
                   تعذر تدوير الرابط. حاول مرة أخرى.
                 </p>
@@ -193,7 +290,7 @@ export default function MembersList({
         })}
       </ul>
       {!canRemove ? (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           لا يمكن إزالة الأعضاء: يجب أن تضم المجموعة عضوين على الأقل.
         </p>
       ) : null}
@@ -201,7 +298,7 @@ export default function MembersList({
         <p
           role="alert"
           data-ocid="groupinfo.remove_error_state"
-          className="text-xs text-destructive"
+          className="text-2xs text-destructive"
         >
           تعذرت إزالة العضو. حاول مرة أخرى.
         </p>

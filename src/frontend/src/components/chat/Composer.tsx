@@ -43,6 +43,8 @@ export default function Composer({
     );
   };
 
+  const canSend = !ended && text.trim().length > 0 && !send.isPending;
+
   return (
     <form
       onSubmit={handleSubmit}
@@ -53,7 +55,7 @@ export default function Composer({
         {detail.members.length > 0 ? (
           <div
             data-ocid="groupchat.mention_list"
-            className="scrollbar-thin -mx-1 flex gap-2 overflow-x-auto px-1 pb-1"
+            className="scrollbar-thin -mx-1 flex gap-1.5 overflow-x-auto px-1 pb-1"
           >
             {detail.members.map((m, i) => (
               <button
@@ -64,7 +66,7 @@ export default function Composer({
                 disabled={ended}
                 className={cn(
                   accentClass(m.accentColor, m.name),
-                  "mention-chip min-h-8 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50",
+                  "mention-chip min-h-8 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-50",
                 )}
               >
                 @{m.name}
@@ -76,12 +78,12 @@ export default function Composer({
           <p
             role="alert"
             data-ocid="groupchat.send_error_state"
-            className="px-2 text-xs text-destructive"
+            className="px-2 text-xs font-medium text-destructive"
           >
             {error}
           </p>
         ) : null}
-        <div className="flex items-center gap-2">
+        <div className="flex items-end gap-1.5 rounded-xl border border-border bg-elevated/50 p-1.5 transition-[border-color,box-shadow] duration-fast focus-within:border-ring/60 focus-within:ring-2 focus-within:ring-ring/20">
           <input
             ref={inputRef}
             value={text}
@@ -93,17 +95,18 @@ export default function Composer({
             placeholder={
               ended
                 ? "انتهت المحادثة ولا يمكن إرسال رسائل"
-                : "اكتب رسالة للفريق أو استخدم @اسم_البوت..."
+                : "اكتب رسالة للفريق أو استخدم @اسم_البوت…"
             }
-            className="admin-input min-h-11 min-w-0 flex-1 px-4 text-base placeholder:text-muted-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-60 md:text-sm"
+            className="h-10 min-w-0 flex-1 bg-transparent px-2.5 text-base text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-60 md:text-sm"
           />
           <button
             type="submit"
             data-ocid="groupchat.send_button"
-            disabled={ended || text.trim().length === 0}
-            className="inline-flex min-h-11 shrink-0 items-center gap-2 rounded-full bg-primary px-5 text-sm font-bold text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:opacity-50"
+            disabled={!canSend}
+            aria-label="إرسال الرسالة"
+            className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-bold text-primary-foreground transition-[background-color,opacity] duration-fast hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <span>إرسال</span>
+            <span className="hidden sm:inline">إرسال</span>
             <SendHorizontal
               aria-hidden="true"
               className="size-4 rtl:-scale-x-100"

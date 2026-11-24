@@ -37,11 +37,11 @@ export default function GroupInfoSheet({
         side="left"
         dir="rtl"
         data-ocid="groupinfo.sheet"
-        className="w-full gap-0 bg-card p-0 sm:max-w-md"
+        className="w-full gap-0 border-s border-border bg-card p-0 sm:max-w-md"
       >
-        <SheetHeader className="border-b border-border pr-14">
-          <SheetTitle className="font-display text-lg">
-            عرض معلومات المجموعة
+        <SheetHeader className="border-b border-border-subtle bg-surface/40 pe-14">
+          <SheetTitle className="font-display text-base font-bold">
+            معلومات المجموعة
           </SheetTitle>
           <SheetDescription className="truncate">{group.name}</SheetDescription>
         </SheetHeader>

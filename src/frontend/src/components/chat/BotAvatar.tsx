@@ -1,6 +1,5 @@
-import { accentClass } from "@/lib/convert";
+import { accentClass, initialOf } from "@/lib/convert";
 import { cn } from "@/lib/utils";
-import { Bot } from "lucide-react";
 
 interface BotAvatarProps {
   name: string;
@@ -12,12 +11,15 @@ interface BotAvatarProps {
 }
 
 const SIZES = {
-  sm: "size-8 [&>svg]:size-4",
-  md: "size-10 [&>svg]:size-5",
-  lg: "size-14 [&>svg]:size-7",
+  sm: "size-8 text-2xs",
+  md: "size-10 text-sm",
+  lg: "size-14 text-lg",
 } as const;
 
-/** Circular robot avatar with a glowing ring in the member's accent colour. */
+/**
+ * Circular avatar with the bot's initial, tinted by its accent colour (a hash
+ * of the name when no known palette colour is stored).
+ */
 export default function BotAvatar({
   name,
   accentColor,
@@ -33,12 +35,12 @@ export default function BotAvatar({
         accentClass(accentColor, name),
         state === "offline" ? "avatar-ring-offline" : "avatar-ring",
         state === "live" && "avatar-ring-live",
-        "flex shrink-0 items-center justify-center bg-secondary text-bot",
+        "flex shrink-0 items-center justify-center bg-bot-soft font-bold text-bot",
         SIZES[size],
         className,
       )}
     >
-      <Bot aria-hidden="true" />
+      <span aria-hidden="true">{initialOf(name)}</span>
     </span>
   );
 }

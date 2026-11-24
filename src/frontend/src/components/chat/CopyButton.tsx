@@ -7,6 +7,8 @@ interface CopyButtonProps {
   text: string;
   ocid: string;
   className?: string;
+  /** Icon-only rendering for dense toolbars; `label` becomes the aria-label. */
+  compact?: boolean;
 }
 
 async function writeClipboard(text: string): Promise<boolean> {
@@ -24,6 +26,7 @@ export default function CopyButton({
   text,
   ocid,
   className,
+  compact = false,
 }: CopyButtonProps) {
   const [status, setStatus] = useState<"idle" | "copied" | "failed">("idle");
   const timer = useRef<number | undefined>(undefined);
@@ -37,15 +40,25 @@ export default function CopyButton({
     timer.current = window.setTimeout(() => setStatus("idle"), 1800);
   };
 
+  const text_ =
+    status === "copied"
+      ? "تم النسخ ✓"
+      : status === "failed"
+        ? "تعذر النسخ"
+        : label;
+
   return (
     <button
       type="button"
       data-ocid={ocid}
       onClick={handleClick}
+      aria-label={compact ? text_ : undefined}
+      title={compact ? label : undefined}
       className={cn(
-        "inline-flex min-h-9 items-center gap-1.5 rounded-full border border-border bg-secondary px-3 text-xs font-semibold text-foreground transition-colors hover:bg-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-        status === "copied" && "border-success text-success",
-        status === "failed" && "border-destructive text-destructive",
+        "inline-flex min-h-9 items-center justify-center gap-1.5 rounded-full border border-border bg-secondary/70 font-semibold text-secondary-foreground transition-[background-color,border-color,color] duration-fast ease-out hover:border-border-strong hover:bg-elevated focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60",
+        compact ? "size-9 px-0" : "px-3 text-xs",
+        status === "copied" && "border-success/50 text-success",
+        status === "failed" && "border-destructive/50 text-destructive",
         className,
       )}
     >
@@ -54,13 +67,7 @@ export default function CopyButton({
       ) : (
         <Copy aria-hidden="true" className="size-3.5" />
       )}
-      <span aria-live="polite">
-        {status === "copied"
-          ? "تم النسخ ✓"
-          : status === "failed"
-            ? "تعذر النسخ"
-            : label}
-      </span>
+      {compact ? null : <span aria-live="polite">{text_}</span>}
     </button>
   );
 }
