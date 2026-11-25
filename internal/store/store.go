@@ -105,14 +105,19 @@ func validateMaxTurns(n int64) (int64, error) {
 // ---------------------------------------------------------------------------
 
 type Group struct {
-	ID               int64    `json:"id"`
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	Topic            string   `json:"topic"`
-	Status           string   `json:"status"` // running | waiting_for_leader | paused | completed | stopped
-	TurnMode         string   `json:"turnMode"`
-	MaxTurns         int64    `json:"maxTurns"`
-	TurnSeq          int64    `json:"turnSeq"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Topic       string `json:"topic"`
+	Status      string `json:"status"` // running | waiting_for_leader | paused | completed | stopped
+	TurnMode    string `json:"turnMode"`
+	MaxTurns    int64  `json:"maxTurns"`
+	TurnSeq     int64  `json:"turnSeq"`
+	// TurnEpoch identifies the current turn assignment. It stays fixed across
+	// pause/resume, server restarts and explicit retries, and increments
+	// whenever a turn is assigned to a speaker (including a new assignment
+	// after skip cycles).
+	TurnEpoch        int64    `json:"turnEpoch"`
 	CurrentTurnBotID *string  `json:"currentTurnBotId"`
 	TurnQueue        []string `json:"turnQueue"`
 	MockDelaySec     int64    `json:"mockDelaySec"`
@@ -129,11 +134,15 @@ type Member struct {
 	RoleTitle   string `json:"roleTitle"`
 	AccentColor string `json:"accentColor"`
 	IsMock      bool   `json:"isMock"`
-	AgentToken  string `json:"agentToken"`
-	TokenHash   string `json:"-"`
-	TokenEnc    string `json:"-"`
-	LastSeenAt  int64  `json:"lastSeenAt"`
-	Online      bool   `json:"online"`
+	// IsManaged marks a member whose replies the server writes. Such a member
+	// has no token and must count as available for turn routing even before
+	// its first run; a disabled managed agent is not marked here.
+	IsManaged  bool   `json:"isManaged"`
+	AgentToken string `json:"agentToken"`
+	TokenHash  string `json:"-"`
+	TokenEnc   string `json:"-"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Online     bool   `json:"online"`
 }
 
 type Message struct {
@@ -660,10 +669,10 @@ DROP INDEX IF EXISTS idx_members_presence;
 			version: 2,
 			name:    "002_harden_tokens_and_turn_uniqueness",
 			apply: func(ctx context.Context, conn *sql.Conn) error {
-				if err := ensureConnColumn(ctx, conn, "bot_members", "token_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
+				if _, err := ensureConnColumn(ctx, conn, "bot_members", "token_hash", "TEXT NOT NULL DEFAULT ''"); err != nil {
 					return err
 				}
-				if err := ensureConnColumn(ctx, conn, "bot_members", "token_enc", "TEXT NOT NULL DEFAULT ''"); err != nil {
+				if _, err := ensureConnColumn(ctx, conn, "bot_members", "token_enc", "TEXT NOT NULL DEFAULT ''"); err != nil {
 					return err
 				}
 				// System auto-pause messages historically shared turn_seq with the bot
@@ -788,6 +797,215 @@ CREATE INDEX IF NOT EXISTS idx_tool_calls_pending ON tool_calls(status) WHERE st
 				return err
 			},
 		},
+		{
+			version: 5,
+			name:    "005_managed_agents",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				// llm_connections holds one provider connection. The API key is
+				// AES-256-GCM encrypted with AAD bound to the row ID; there is no
+				// base_url column because the provider origin is fixed in code.
+				// llm_model_prices hangs prices off (connection, model), not the
+				// connection alone, because two models can cost different amounts.
+				// managed_agents links a real bot_members row (no token) to a model
+				// and its limits. agent_runs records one attempt per row; the
+				// unique (group, bot, turn_seq, turn_started_at, attempt) key plus
+				// the partial open-run index make a second automatic run for the
+				// same turn instance impossible at the storage level, while an
+				// explicit admin retry still appends a new attempt.
+				_, err := conn.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS llm_connections (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  provider          TEXT    NOT NULL,
+  label             TEXT    NOT NULL DEFAULT '',
+  api_key_enc       TEXT    NOT NULL DEFAULT '',
+  api_key_last4     TEXT    NOT NULL DEFAULT '',
+  model_hint        TEXT    NOT NULL DEFAULT '',
+  last_checked_at   INTEGER NOT NULL DEFAULT 0,
+  last_check_status TEXT    NOT NULL DEFAULT '',
+  last_check_error  TEXT    NOT NULL DEFAULT '',
+  created_at        INTEGER NOT NULL DEFAULT 0,
+  updated_at        INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_connections_provider ON llm_connections(provider);
+
+CREATE TABLE IF NOT EXISTS llm_model_prices (
+  connection_id        INTEGER NOT NULL REFERENCES llm_connections(id) ON DELETE CASCADE,
+  model                TEXT    NOT NULL,
+  input_micros_per_1m  INTEGER NOT NULL DEFAULT 0,
+  output_micros_per_1m INTEGER NOT NULL DEFAULT 0,
+  currency             TEXT    NOT NULL DEFAULT 'USD',
+  updated_at           INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (connection_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS managed_agents (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id             INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id               TEXT    NOT NULL,
+  connection_id        INTEGER NOT NULL REFERENCES llm_connections(id) ON DELETE RESTRICT,
+  model                TEXT    NOT NULL DEFAULT '',
+  persona              TEXT    NOT NULL DEFAULT '',
+  max_output_tokens    INTEGER NOT NULL DEFAULT 512,
+  context_max_messages INTEGER NOT NULL DEFAULT 20,
+  context_max_chars    INTEGER NOT NULL DEFAULT 12000,
+  daily_run_limit      INTEGER NOT NULL DEFAULT 50,
+  daily_budget_micros  INTEGER,
+  enabled              INTEGER NOT NULL DEFAULT 1,
+  created_at           INTEGER NOT NULL DEFAULT 0,
+  updated_at           INTEGER NOT NULL DEFAULT 0,
+  UNIQUE (group_id, bot_id),
+  FOREIGN KEY (group_id, bot_id) REFERENCES bot_members(group_id, bot_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_managed_agents_connection ON managed_agents(connection_id);
+
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id          INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  bot_id            TEXT    NOT NULL,
+  agent_id          INTEGER REFERENCES managed_agents(id) ON DELETE SET NULL,
+  turn_seq          INTEGER NOT NULL,
+  turn_started_at   INTEGER NOT NULL DEFAULT 0,
+  attempt           INTEGER NOT NULL DEFAULT 1 CHECK (attempt >= 1),
+  retry_of          INTEGER REFERENCES agent_runs(id) ON DELETE SET NULL,
+  status            TEXT    NOT NULL DEFAULT 'queued'
+                    CHECK (status IN ('queued','running','completed','failed','interrupted','cancelled','discarded')),
+  provider          TEXT    NOT NULL DEFAULT '',
+  model             TEXT    NOT NULL DEFAULT '',
+  request_msg_count INTEGER NOT NULL DEFAULT 0,
+  request_chars     INTEGER NOT NULL DEFAULT 0,
+  prompt_tokens     INTEGER,
+  completion_tokens INTEGER,
+  total_tokens      INTEGER,
+  est_cost_micros   INTEGER,
+  cost_micros       INTEGER,
+  cost_basis        TEXT    NOT NULL DEFAULT 'none'
+                    CHECK (cost_basis IN ('none','estimate','usage')),
+  response_chars    INTEGER NOT NULL DEFAULT 0,
+  message_id        INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+  error_code        TEXT    NOT NULL DEFAULT '',
+  error_msg         TEXT    NOT NULL DEFAULT '',
+  created_at        INTEGER NOT NULL DEFAULT 0,
+  started_at        INTEGER NOT NULL DEFAULT 0,
+  finished_at       INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_attempt
+  ON agent_runs(group_id, bot_id, turn_seq, turn_started_at, attempt);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_open
+  ON agent_runs(group_id, bot_id, turn_seq, turn_started_at)
+  WHERE status IN ('queued','running');
+CREATE INDEX IF NOT EXISTS idx_agent_runs_group ON agent_runs(group_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_day ON agent_runs(agent_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_status ON agent_runs(status);
+`)
+				return err
+			},
+		},
+		{
+			version: 6,
+			name:    "006_agent_run_turn_identity",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				// A turn is identified by (group_id, bot_id, turn_seq). The
+				// clock may move on resume, skip or retry without starting a
+				// new turn, so the uniqueness defences must not include it.
+				// Any duplicate open run left by the old clock-based index
+				// is discarded first (the earliest attempt is kept).
+				_, err := conn.ExecContext(ctx, `
+DROP INDEX IF EXISTS idx_agent_runs_attempt;
+DROP INDEX IF EXISTS idx_agent_runs_open;
+UPDATE agent_runs
+SET attempt = (
+  SELECT COUNT(*) FROM agent_runs AS a
+  WHERE a.group_id = agent_runs.group_id
+    AND a.bot_id = agent_runs.bot_id
+    AND a.turn_seq = agent_runs.turn_seq
+    AND a.id <= agent_runs.id
+);
+UPDATE agent_runs
+SET status = 'discarded',
+    error_code = 'duplicate_open_run',
+    error_msg = 'superseded while tightening the turn identity',
+    finished_at = CAST(strftime('%s','now') AS INTEGER) * 1000
+WHERE status IN ('queued','running')
+  AND id NOT IN (
+    SELECT MIN(id) FROM agent_runs
+    WHERE status IN ('queued','running')
+    GROUP BY group_id, bot_id, turn_seq
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_attempt
+  ON agent_runs(group_id, bot_id, turn_seq, attempt);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_open
+  ON agent_runs(group_id, bot_id, turn_seq)
+  WHERE status IN ('queued','running');
+`)
+				return err
+			},
+		},
+		{
+			version: 7,
+			name:    "007_turn_epoch_and_cost_confirmation",
+			apply: func(ctx context.Context, conn *sql.Conn) error {
+				// turn_epoch is the stable identity of one turn assignment. It
+				// never changes on pause/resume, restart or retry, and changes
+				// on every new assignment (reply advance, skip rotation, leader
+				// assignment, reassignment after a member leaves).
+				groupsAdded, err := ensureConnColumn(ctx, conn, "groups", "turn_epoch",
+					"INTEGER NOT NULL DEFAULT 0")
+				if err != nil {
+					return err
+				}
+				runsAdded, err := ensureConnColumn(ctx, conn, "agent_runs", "turn_epoch",
+					"INTEGER NOT NULL DEFAULT 0")
+				if err != nil {
+					return err
+				}
+				// cost_confirmed=1 means the provider reported the cost itself;
+				// 0 means the cost was computed from reported usage and a stored
+				// price. Historical rows cannot be told apart, so they stay 0.
+				if _, err := ensureConnColumn(ctx, conn, "agent_runs", "cost_confirmed",
+					"INTEGER NOT NULL DEFAULT 0"); err != nil {
+					return err
+				}
+				if groupsAdded {
+					if _, err := conn.ExecContext(ctx, "UPDATE groups SET turn_epoch = turn_seq"); err != nil {
+						return err
+					}
+				}
+				if runsAdded {
+					if _, err := conn.ExecContext(ctx, "UPDATE agent_runs SET turn_epoch = turn_seq"); err != nil {
+						return err
+					}
+				}
+				_, err = conn.ExecContext(ctx, `
+DROP INDEX IF EXISTS idx_agent_runs_attempt;
+DROP INDEX IF EXISTS idx_agent_runs_open;
+UPDATE agent_runs
+SET attempt = (
+  SELECT COUNT(*) FROM agent_runs AS a
+  WHERE a.group_id = agent_runs.group_id
+    AND a.bot_id = agent_runs.bot_id
+    AND a.turn_epoch = agent_runs.turn_epoch
+    AND a.id <= agent_runs.id
+);
+UPDATE agent_runs
+SET status = 'discarded',
+    error_code = 'duplicate_open_run',
+    error_msg = 'superseded while tightening the turn identity',
+    finished_at = CAST(strftime('%s','now') AS INTEGER) * 1000
+WHERE status IN ('queued','running')
+  AND id NOT IN (
+    SELECT MIN(id) FROM agent_runs
+    WHERE status IN ('queued','running')
+    GROUP BY group_id, bot_id, turn_epoch
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_attempt
+  ON agent_runs(group_id, bot_id, turn_epoch, attempt);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_runs_open
+  ON agent_runs(group_id, bot_id, turn_epoch)
+  WHERE status IN ('queued','running');
+`)
+				return err
+			},
+		},
 	}
 
 	for _, m := range migrations {
@@ -882,10 +1100,12 @@ func (s *Store) hasColumn(ctx context.Context, table, col string) (bool, error) 
 	return false, rows.Err()
 }
 
-func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef string) error {
+// ensureConnColumn adds a column when it is missing and reports whether it
+// added it now, so a migration can backfill only columns it just created.
+func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef string) (bool, error) {
 	rows, err := conn.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer rows.Close()
 	found := false
@@ -895,7 +1115,7 @@ func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef st
 		var notnull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
+			return false, err
 		}
 		if name == col {
 			found = true
@@ -903,14 +1123,15 @@ func ensureConnColumn(ctx context.Context, conn *sql.Conn, table, col, colDef st
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
 	if !found {
 		if _, err := conn.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+col+" "+colDef); err != nil {
-			return err
+			return false, err
 		}
+		return true, nil
 	}
-	return nil
+	return false, nil
 }
 
 func rebuildBotMembersWithoutAgentToken(ctx context.Context, conn *sql.Conn) error {
@@ -1226,7 +1447,7 @@ func capText(t string, limit int) string {
 }
 
 func isOnline(m Member, nowMs int64) bool {
-	return m.IsMock || nowMs-m.LastSeenAt <= OnlineWindowMs
+	return m.IsMock || m.IsManaged || nowMs-m.LastSeenAt <= OnlineWindowMs
 }
 
 func sortMembers(ms []Member) {
@@ -1276,7 +1497,7 @@ func scanGroup(row *sql.Row) (*Group, error) {
 	var current sql.NullString
 	var queue string
 	err := row.Scan(&g.ID, &g.Name, &g.Description, &g.Topic, &g.Status, &g.TurnMode,
-		&g.MaxTurns, &g.TurnSeq, &current, &queue, &g.MockDelaySec,
+		&g.MaxTurns, &g.TurnSeq, &g.TurnEpoch, &current, &queue, &g.MockDelaySec,
 		&g.TurnStartedAt, &g.SkipStreak, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -1294,7 +1515,7 @@ func scanGroup(row *sql.Row) (*Group, error) {
 	return &g, nil
 }
 
-const groupCols = `id, name, description, topic, status, turn_mode, max_turns, turn_seq,
+const groupCols = `id, name, description, topic, status, turn_mode, max_turns, turn_seq, turn_epoch,
 	current_turn_bot_id, turn_queue, mock_delay_sec, turn_started_at, skip_streak, created_at, updated_at`
 
 func loadGroup(ctx context.Context, q querier, id int64) (*Group, error) {
@@ -1308,8 +1529,12 @@ func loadGroup(ctx context.Context, q querier, id int64) (*Group, error) {
 
 func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]Member, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, token_hash, token_enc, last_seen_at
-		 FROM bot_members WHERE group_id = ?`, groupID)
+		`SELECT b.group_id, b.bot_id, b.name, b.role_title, b.accent_color, b.is_mock,
+		        b.token_hash, b.token_enc, b.last_seen_at,
+		        CASE WHEN ma.id IS NULL THEN 0 ELSE 1 END
+		 FROM bot_members b
+		 LEFT JOIN managed_agents ma ON ma.group_id = b.group_id AND ma.bot_id = b.bot_id AND ma.enabled = 1
+		 WHERE b.group_id = ?`, groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -1318,11 +1543,13 @@ func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]M
 	for rows.Next() {
 		var m Member
 		var isMock int
+		var isManaged int
 		if err := rows.Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
-			&isMock, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt); err != nil {
+			&isMock, &m.TokenHash, &m.TokenEnc, &m.LastSeenAt, &isManaged); err != nil {
 			return nil, err
 		}
 		m.IsMock = isMock != 0
+		m.IsManaged = isManaged != 0
 		if m.TokenEnc != "" && len(key) >= 32 {
 			if dec, err := DecryptToken(key, m.TokenEnc, MemberAAD(m.GroupID, m.BotID)); err == nil {
 				m.AgentToken = dec
@@ -1344,8 +1571,11 @@ func loadMembers(ctx context.Context, q querier, groupID int64, key []byte) ([]M
 // selected on the anonymous path.
 func loadMembersLite(ctx context.Context, q querier, groupID int64) ([]Member, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT group_id, bot_id, name, role_title, accent_color, is_mock, last_seen_at
-		 FROM bot_members WHERE group_id = ?`, groupID)
+		`SELECT b.group_id, b.bot_id, b.name, b.role_title, b.accent_color, b.is_mock, b.last_seen_at,
+		        CASE WHEN ma.id IS NULL THEN 0 ELSE 1 END
+		 FROM bot_members b
+		 LEFT JOIN managed_agents ma ON ma.group_id = b.group_id AND ma.bot_id = b.bot_id AND ma.enabled = 1
+		 WHERE b.group_id = ?`, groupID)
 	if err != nil {
 		return nil, err
 	}
@@ -1354,11 +1584,13 @@ func loadMembersLite(ctx context.Context, q querier, groupID int64) ([]Member, e
 	for rows.Next() {
 		var m Member
 		var isMock int
+		var isManaged int
 		if err := rows.Scan(&m.GroupID, &m.BotID, &m.Name, &m.RoleTitle, &m.AccentColor,
-			&isMock, &m.LastSeenAt); err != nil {
+			&isMock, &m.LastSeenAt, &isManaged); err != nil {
 			return nil, err
 		}
 		m.IsMock = isMock != 0
+		m.IsManaged = isManaged != 0
 		ms = append(ms, m)
 	}
 	if err := rows.Err(); err != nil {
@@ -1537,9 +1769,9 @@ func (s *Store) saveGroup(ctx context.Context, q querier, g *Group) error {
 	}
 	if _, err := ex.ExecContext(ctx,
 		`UPDATE groups SET name=?, description=?, topic=?, status=?, turn_mode=?, max_turns=?,
-		 turn_seq=?, current_turn_bot_id=?, turn_queue=?, mock_delay_sec=?, turn_started_at=?,
+		 turn_seq=?, turn_epoch=?, current_turn_bot_id=?, turn_queue=?, mock_delay_sec=?, turn_started_at=?,
 		 skip_streak=?, updated_at=? WHERE id=?`,
-		g.Name, g.Description, g.Topic, g.Status, g.TurnMode, g.MaxTurns, g.TurnSeq,
+		g.Name, g.Description, g.Topic, g.Status, g.TurnMode, g.MaxTurns, g.TurnSeq, g.TurnEpoch,
 		current, string(queue), g.MockDelaySec, g.TurnStartedAt, g.SkipStreak, g.UpdatedAt, g.ID); err != nil {
 		return err
 	}

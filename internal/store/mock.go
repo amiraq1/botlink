@@ -245,6 +245,12 @@ func (s *Store) processExpiredTurnTx(ctx context.Context, conn *sql.Conn, groupI
 	if nowMs-g.TurnStartedAt < timeoutMs {
 		return nil
 	}
+	// The managed runner's deadline is this same turn clock, so an open run
+	// that outlived its turn is cancelled here before the skip rotates it.
+	if err := cancelAgentRunsTx(ctx, conn, groupID, "turn_timeout",
+		"cancelled because the turn timed out", nowMs); err != nil {
+		return err
+	}
 
 	// CAS: re-read happens under the write lock above; late replies with
 	// the old turnSeq are rejected by SubmitBotReply's turnSeq check.

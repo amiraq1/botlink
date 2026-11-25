@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -59,6 +60,27 @@ func main() {
 		logger.Println("WARNING: ADMIN_PASSWORD is not set — admin login is disabled until it is set.")
 	}
 
+	// Local integration tests may point managed-agent provider calls at a fake
+	// server. The override is development-only and loopback-only; production
+	// always uses the fixed DeepSeek origin.
+	providerBaseURL := ""
+	if raw := os.Getenv("BOTLINK_DEV_PROVIDER_URL"); raw != "" {
+		if !devMode || production {
+			logger.Fatal("BOTLINK_DEV_PROVIDER_URL is only allowed with BOTLINK_DEV=1 outside production")
+		}
+		u, err := url.Parse(raw)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
+			logger.Fatal("BOTLINK_DEV_PROVIDER_URL must be a plain loopback http(s) origin")
+		}
+		host := u.Hostname()
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			logger.Fatal("BOTLINK_DEV_PROVIDER_URL must be loopback (127.0.0.1, ::1 or localhost)")
+		}
+		providerBaseURL = strings.TrimRight(raw, "/")
+		logger.Printf("WARNING: provider calls go to the development fake at %s; never enable this in production.", providerBaseURL)
+	}
+
 	clientIPHeader := os.Getenv("CLIENT_IP_HEADER")
 	if os.Getenv("RAILWAY_ENVIRONMENT") != "" && clientIPHeader == "" {
 		logger.Println("WARNING: running on Railway (RAILWAY_ENVIRONMENT is set) but CLIENT_IP_HEADER is not set. Set CLIENT_IP_HEADER=X-Real-IP so real client IPs can be determined accurately.")
@@ -86,6 +108,14 @@ func main() {
 		}
 		turnTimeoutSec = n
 	}
+	agentConcurrency := 0 // runner default
+	if raw := os.Getenv("AGENT_MAX_CONCURRENCY"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 16 {
+			logger.Fatal("AGENT_MAX_CONCURRENCY must be an integer between 1 and 16")
+		}
+		agentConcurrency = n
+	}
 	if raw := os.Getenv("TOOL_CALL_RETENTION"); raw != "" {
 		n, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || n < 60 {
@@ -103,6 +133,11 @@ func main() {
 	initNow := time.Now().UnixMilli()
 	if err := st.CancelAllPendingToolCalls(context.Background(), initNow); err != nil {
 		logger.Printf("warning: cleanup orphan pending tool calls: %v", err)
+	}
+	if n, err := st.InterruptStaleAgentRuns(context.Background(), initNow); err != nil {
+		logger.Printf("warning: interrupt stale agent runs: %v", err)
+	} else if n > 0 {
+		logger.Printf("interrupted %d managed-agent run(s) left open by a previous process", n)
 	}
 	if err := tools.SyncBuiltinTools(context.Background(), st, initNow); err != nil {
 		logger.Fatalf("sync builtin tools: %v", err)
@@ -135,6 +170,8 @@ func main() {
 		TrustedProxies:         trustedProxies,
 		TrustHeaderAlways:      trustAlways,
 		TurnTimeoutSec:         turnTimeoutSec,
+		AgentMaxConcurrency:    agentConcurrency,
+		ProviderBaseURL:        providerBaseURL,
 		Production:             production,
 		CookieSecure:           cookieSecure,
 	}, st)

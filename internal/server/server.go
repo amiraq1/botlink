@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/amiraq1/botlink/internal/agent"
 	"github.com/amiraq1/botlink/internal/store"
 )
 
@@ -46,6 +47,12 @@ type Config struct {
 	// identity strictly from this request header (e.g. X-Real-IP on Railway).
 	ClientIPHeader string
 	TurnTimeoutSec int64
+	// AgentMaxConcurrency bounds simultaneous managed-agent provider calls.
+	// Zero uses the runner default.
+	AgentMaxConcurrency int
+	// ProviderBaseURL overrides the provider origin for local integration
+	// tests with a fake provider. Ignored in production.
+	ProviderBaseURL string
 	// Production indicates the server is running in production mode (enforcing secure cookies).
 	Production bool
 	// CookieSecure explicitly forces the Secure attribute on cookies.
@@ -87,12 +94,20 @@ type Server struct {
 	toolCallLimiter *windowLimiter
 
 	webhookClient *SafeWebhookClient
+
+	// llmTransport is the transport used for provider requests. It is nil in
+	// production (the provider builds a hardened default) and is only set by
+	// tests to use a fake provider. It never carries a configurable origin.
+	llmTransport    http.RoundTripper
+	providerBaseURL string
+
 	toolCancelsMu sync.Mutex
 	toolCancels   map[int64]map[uint64]context.CancelFunc
 	toolCancelSeq uint64
 
 	broker       *eventBroker
 	sched        *turnScheduler
+	agentRunner  *agent.Runner
 	streamCtx    context.Context
 	streamCancel context.CancelFunc
 
@@ -114,6 +129,10 @@ func New(cfg Config, st *store.Store) *Server {
 		clock = func() int64 { return time.Now().UnixMilli() }
 	}
 	logger := cfg.Logger
+	providerBaseURL := cfg.ProviderBaseURL
+	if cfg.Production {
+		providerBaseURL = ""
+	}
 	if logger == nil {
 		logger = log.New(os.Stdout, "botlink: ", log.LstdFlags)
 	}
@@ -131,6 +150,7 @@ func New(cfg Config, st *store.Store) *Server {
 		trustHeaderAlways:  cfg.TrustHeaderAlways,
 		production:         cfg.Production,
 		cookieSecure:       cfg.CookieSecure,
+		providerBaseURL:    providerBaseURL,
 		loginAttempt:       map[string][]time.Time{},
 		roomGETLimiter:     newWindowLimiter(60, time.Minute, 8192),
 		roomPOSTLimiter:    newWindowLimiter(10, time.Minute, 8192),
@@ -143,6 +163,14 @@ func New(cfg Config, st *store.Store) *Server {
 	s.streamCtx, s.streamCancel = context.WithCancel(context.Background())
 	s.broker = newEventBroker(maxEventSubscribers, maxEventSubscribersPerGroup)
 	s.sched = newTurnScheduler(st, s.turnTimeoutMs, s.log, s.clock, s.cancelGroupTools)
+	s.agentRunner = agent.NewRunner(st, agent.Config{
+		MaxConcurrency: cfg.AgentMaxConcurrency,
+		TurnTimeoutMs:  cfg.TurnTimeoutSec * 1000,
+		Transport:      s.llmTransport,
+		BaseURL:        s.providerBaseURL,
+		Clock:          s.clock,
+		Logger:         s.log,
+	})
 	st.SetChangeHook(s.onGroupChange)
 	if len(s.trustedProxies) == 0 {
 		s.trustedProxies = parseCIDRs(DefaultTrustedProxies)
@@ -158,6 +186,9 @@ func (s *Server) Handler() http.Handler {
 // Close stops live event streams and releases their subscriptions. Call it
 // before http.Server.Shutdown so graceful shutdown is not held open.
 func (s *Server) Close() {
+	if s.agentRunner != nil {
+		s.agentRunner.Close()
+	}
 	if s.streamCancel != nil {
 		s.streamCancel()
 	}
@@ -169,6 +200,9 @@ func (s *Server) Close() {
 func (s *Server) onGroupChange(groupID int64) {
 	s.broker.publish(groupID)
 	s.sched.wake()
+	if s.agentRunner != nil {
+		s.agentRunner.Wake()
+	}
 }
 
 func (s *Server) routes() {
@@ -218,6 +252,28 @@ func (s *Server) routes() {
 
 	// Tool Calls Audit Log (admin)
 	s.mux.HandleFunc("GET /api/admin/groups/{id}/tool-calls", s.requireAdmin(s.handleListToolCallsAudit))
+
+	// Managed agents (admin): create, list, edit and delete a managed member.
+	s.mux.HandleFunc("GET /api/admin/groups/{id}/managed-agents", s.requireAdmin(s.handleListManagedAgents))
+	s.mux.HandleFunc("POST /api/admin/groups/{id}/managed-agents", s.requireAdmin(s.handleCreateManagedAgent))
+	s.mux.HandleFunc("PUT /api/admin/groups/{id}/managed-agents/{botId}", s.requireAdmin(s.handleUpdateManagedAgent))
+	s.mux.HandleFunc("DELETE /api/admin/groups/{id}/managed-agents/{botId}", s.requireAdmin(s.handleDeleteManagedAgent))
+
+	// Managed-agent runs (admin): explicit retry/cancel and read-only views.
+	s.mux.HandleFunc("GET /api/admin/groups/{id}/agent-runs", s.requireAdmin(s.handleListAgentRuns))
+	s.mux.HandleFunc("POST /api/admin/groups/{id}/agent-runs/{runId}/retry", s.requireAdmin(s.handleRetryAgentRun))
+	s.mux.HandleFunc("POST /api/admin/groups/{id}/agent-runs/{runId}/cancel", s.requireAdmin(s.handleCancelAgentRun))
+	s.mux.HandleFunc("GET /api/admin/groups/{id}/agents/{botId}/usage", s.requireAdmin(s.handleAgentUsage))
+
+	// LLM connections and model prices (admin)
+	s.mux.HandleFunc("GET /api/admin/llm/connections", s.requireAdmin(s.handleListLLMConnections))
+	s.mux.HandleFunc("POST /api/admin/llm/connections", s.requireAdmin(s.handleCreateLLMConnection))
+	s.mux.HandleFunc("PUT /api/admin/llm/connections/{id}", s.requireAdmin(s.handleUpdateLLMConnection))
+	s.mux.HandleFunc("DELETE /api/admin/llm/connections/{id}", s.requireAdmin(s.handleDeleteLLMConnection))
+	s.mux.HandleFunc("POST /api/admin/llm/connections/{id}/check", s.requireAdmin(s.handleCheckLLMConnection))
+	s.mux.HandleFunc("GET /api/admin/llm/connections/{id}/prices", s.requireAdmin(s.handleListModelPrices))
+	s.mux.HandleFunc("PUT /api/admin/llm/connections/{id}/prices/{model}", s.requireAdmin(s.handleSetModelPrice))
+	s.mux.HandleFunc("DELETE /api/admin/llm/connections/{id}/prices/{model}", s.requireAdmin(s.handleDeleteModelPrice))
 
 	// Static frontend + SPA fallback (everything else).
 	s.mux.HandleFunc("/", s.handleStatic)
@@ -770,6 +826,13 @@ func (s *Server) handleLeaderMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) simpleGroupAction(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, id int64, now int64) error) {
+	s.groupAction(w, r, fn, nil)
+}
+
+// groupAction runs one group mutation, then invokes after (if any) only on
+// success. Pause/Skip/Stop use it to abort in-flight managed runs after the
+// store has atomically cancelled their rows.
+func (s *Server) groupAction(w http.ResponseWriter, r *http.Request, fn func(ctx context.Context, id int64, now int64) error, after func(groupID int64)) {
 	id, ok := s.groupID(r)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid group id")
@@ -778,6 +841,9 @@ func (s *Server) simpleGroupAction(w http.ResponseWriter, r *http.Request, fn fu
 	if err := fn(r.Context(), id, s.nowMs()); err != nil {
 		s.handleStoreErr(w, err)
 		return
+	}
+	if after != nil {
+		after(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -819,6 +885,14 @@ func (s *Server) cancelGroupTools(groupID int64) {
 	_ = s.store.CancelPendingToolCalls(context.Background(), groupID, s.nowMs())
 }
 
+// cancelGroupAgentRuns aborts the in-flight provider request of a group after
+// the store's turn transaction has cancelled its open run rows.
+func (s *Server) cancelGroupAgentRuns(groupID int64) {
+	if s.agentRunner != nil {
+		s.agentRunner.CancelGroup(groupID)
+	}
+}
+
 func (s *Server) toolCallRateOK(w http.ResponseWriter, r *http.Request, token string) bool {
 	ip := s.clientIP(r)
 	now := time.Now()
@@ -835,14 +909,14 @@ func (s *Server) handleSkip(w http.ResponseWriter, r *http.Request) {
 	if id, ok := s.groupID(r); ok {
 		s.cancelGroupTools(id)
 	}
-	s.simpleGroupAction(w, r, s.store.SkipCurrentTurn)
+	s.groupAction(w, r, s.store.SkipCurrentTurn, s.cancelGroupAgentRuns)
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	if id, ok := s.groupID(r); ok {
 		s.cancelGroupTools(id)
 	}
-	s.simpleGroupAction(w, r, s.store.PauseGroup)
+	s.groupAction(w, r, s.store.PauseGroup, s.cancelGroupAgentRuns)
 }
 
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
@@ -853,7 +927,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if id, ok := s.groupID(r); ok {
 		s.cancelGroupTools(id)
 	}
-	s.simpleGroupAction(w, r, s.store.StopGroup)
+	s.groupAction(w, r, s.store.StopGroup, s.cancelGroupAgentRuns)
 }
 
 func (s *Server) handleSetTurnMode(w http.ResponseWriter, r *http.Request) {
@@ -982,6 +1056,7 @@ func (s *Server) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request)
 // for sessions, retention and any event the scheduler missed.
 func (s *Server) StartTurnSweeper(ctx context.Context) {
 	go s.sched.run(ctx)
+	go s.agentRunner.Run(ctx)
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -996,6 +1071,7 @@ func (s *Server) StartTurnSweeper(ctx context.Context) {
 					due, err := s.store.NextDue(ctx, id, now, s.turnTimeoutMs())
 					if err == nil && due.Kind != "" && due.DueAt <= now {
 						s.cancelGroupTools(id)
+						s.cancelGroupAgentRuns(id)
 					}
 				}
 			}

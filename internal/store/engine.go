@@ -129,6 +129,7 @@ func hasMember(ms []Member, botID *string) bool {
 // / status is chosen according to the turn mode.
 func advanceAfterReply(g *Group, ms []Member, nowMs int64) {
 	newSeq := g.TurnSeq + 1
+	g.TurnEpoch++ // a new turn assignment
 	if newSeq > g.MaxTurns {
 		g.Status = "completed"
 		g.TurnSeq = newSeq
@@ -182,6 +183,9 @@ func advanceAfterSkip(g *Group, ms []Member, nowMs int64) {
 		}
 		g.CurrentTurnBotID = next
 		g.TurnQueue = rest
+	}
+	if g.CurrentTurnBotID != nil {
+		g.TurnEpoch++ // skip rotation assigns the turn to another speaker
 	}
 	g.TurnStartedAt = nowMs
 	g.UpdatedAt = nowMs
@@ -237,12 +241,16 @@ func (s *Store) CreateGroup(ctx context.Context, in CreateGroupInput, nowMs int6
 		} else {
 			status = "waiting_for_leader"
 		}
+		epoch := int64(0)
+		if current != nil {
+			epoch = 1
+		}
 		res, err := conn.ExecContext(ctx,
-			`INSERT INTO groups (name, description, topic, status, turn_mode, max_turns, turn_seq,
+			`INSERT INTO groups (name, description, topic, status, turn_mode, max_turns, turn_seq, turn_epoch,
 			 current_turn_bot_id, turn_queue, mock_delay_sec, turn_started_at, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, '[]', ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, '[]', ?, ?, ?, ?)`,
 			name, desc, capText(trimText(Sanitize(in.Topic)), 500), status, in.TurnMode, maxTurns,
-			current, mockDelay, nowMs, nowMs, nowMs)
+			epoch, current, mockDelay, nowMs, nowMs, nowMs)
 		if err != nil {
 			return err
 		}
@@ -427,6 +435,9 @@ func (s *Store) SendLeaderMessage(ctx context.Context, groupID int64, rawText st
 			}
 			g.CurrentTurnBotID = first
 			g.TurnQueue = rest
+			if first != nil {
+				g.TurnEpoch++
+			}
 			g.TurnStartedAt = nowMs
 		}
 		g.UpdatedAt = nowMs
@@ -442,6 +453,10 @@ func (s *Store) SkipCurrentTurn(ctx context.Context, groupID int64, nowMs int64)
 		}
 		if g.Status != "running" {
 			return wrapErr(ErrValidation, "Group is not running")
+		}
+		if err := cancelAgentRunsTx(ctx, conn, groupID, "cancelled",
+			"cancelled because the turn was skipped", nowMs); err != nil {
+			return err
 		}
 		ms, err := s.loadMembersLive(ctx, conn, groupID, nowMs)
 		if err != nil {
@@ -460,6 +475,10 @@ func (s *Store) PauseGroup(ctx context.Context, groupID int64, nowMs int64) erro
 		}
 		switch g.Status {
 		case "running", "waiting_for_leader":
+			if err := cancelAgentRunsTx(ctx, conn, groupID, "cancelled",
+				"cancelled because the group was paused", nowMs); err != nil {
+				return err
+			}
 			g.Status = "paused"
 			g.UpdatedAt = nowMs
 			return s.saveGroup(ctx, conn, g)
@@ -492,6 +511,7 @@ func (s *Store) ResumeGroup(ctx context.Context, groupID int64, nowMs int64) err
 			current := g.CurrentTurnBotID
 			if !hasMember(ms, current) {
 				current = nextAutoSpeaker(ms, g.CurrentTurnBotID, nowMs)
+				g.TurnEpoch++ // resuming into a different speaker is a new assignment
 			}
 			g.Status = "running"
 			g.CurrentTurnBotID = current
@@ -505,6 +525,7 @@ func (s *Store) ResumeGroup(ctx context.Context, groupID int64, nowMs int64) err
 				next, rest := popQueue(g.TurnQueue, ms)
 				if next != nil {
 					g.Status = "running"
+					g.TurnEpoch++
 				} else {
 					g.Status = "waiting_for_leader"
 				}
@@ -526,6 +547,10 @@ func (s *Store) StopGroup(ctx context.Context, groupID int64, nowMs int64) error
 		}
 		if g.Status == "completed" || g.Status == "stopped" {
 			return nil
+		}
+		if err := cancelAgentRunsTx(ctx, conn, groupID, "cancelled",
+			"cancelled because the group was stopped", nowMs); err != nil {
+			return err
 		}
 		g.Status = "stopped"
 		g.CurrentTurnBotID = nil
@@ -565,6 +590,7 @@ func (s *Store) SetTurnMode(ctx context.Context, groupID int64, mode string, now
 				current := g.CurrentTurnBotID
 				if !hasMember(ms, current) {
 					current = nextAutoSpeaker(ms, nil, nowMs)
+					g.TurnEpoch++
 				}
 				g.TurnMode = mode
 				g.CurrentTurnBotID = current
@@ -574,6 +600,7 @@ func (s *Store) SetTurnMode(ctx context.Context, groupID int64, mode string, now
 				g.Status = "running"
 				g.CurrentTurnBotID = nextAutoSpeaker(ms, nil, nowMs)
 				g.TurnQueue = []string{}
+				g.TurnEpoch++
 				g.TurnStartedAt = nowMs
 			default:
 				g.TurnMode = mode
@@ -659,73 +686,85 @@ func (s *Store) AddMember(ctx context.Context, groupID int64, in MemberInput, no
 
 func (s *Store) RemoveMember(ctx context.Context, groupID int64, botID string, nowMs int64) error {
 	return s.immediateTx(ctx, func(ctx context.Context, conn *sql.Conn) error {
-		g, err := loadGroup(ctx, conn, groupID)
-		if err != nil {
-			return err
+		return s.removeMemberTx(ctx, conn, groupID, botID, nowMs)
+	})
+}
+
+// removeMemberTx deletes one member and repairs the turn state. It must run
+// inside an existing write transaction. A managed agent config cascades away
+// through managed_agents' ON DELETE CASCADE foreign key, so a config can never
+// outlive its member.
+func (s *Store) removeMemberTx(ctx context.Context, conn *sql.Conn, groupID int64, botID string, nowMs int64) error {
+	g, err := loadGroup(ctx, conn, groupID)
+	if err != nil {
+		return err
+	}
+	ms, err := s.loadMembersLive(ctx, conn, groupID, nowMs)
+	if err != nil {
+		return err
+	}
+	if len(ms) <= 2 {
+		return wrapErr(ErrValidation, "A group needs at least 2 members")
+	}
+	var target *Member
+	for i := range ms {
+		if ms[i].BotID == botID {
+			target = &ms[i]
+			break
 		}
-		ms, err := s.loadMembersLive(ctx, conn, groupID, nowMs)
-		if err != nil {
-			return err
+	}
+	if target == nil {
+		return wrapErr(ErrNotFound, "Member not found")
+	}
+	if _, err := conn.ExecContext(ctx,
+		"DELETE FROM bot_members WHERE group_id = ? AND bot_id = ?", groupID, botID); err != nil {
+		return err
+	}
+	var remaining []Member
+	for _, m := range ms {
+		if m.BotID != botID {
+			remaining = append(remaining, m)
 		}
-		if len(ms) <= 2 {
-			return wrapErr(ErrValidation, "A group needs at least 2 members")
+	}
+	var queue []string
+	for _, b := range g.TurnQueue {
+		if b != botID {
+			queue = append(queue, b)
 		}
-		var target *Member
-		for i := range ms {
-			if ms[i].BotID == botID {
-				target = &ms[i]
-				break
-			}
-		}
-		if target == nil {
-			return wrapErr(ErrNotFound, "Member not found")
-		}
-		if _, err := conn.ExecContext(ctx,
-			"DELETE FROM bot_members WHERE group_id = ? AND bot_id = ?", groupID, botID); err != nil {
-			return err
-		}
-		var remaining []Member
-		for _, m := range ms {
-			if m.BotID != botID {
-				remaining = append(remaining, m)
-			}
-		}
-		var queue []string
-		for _, b := range g.TurnQueue {
-			if b != botID {
-				queue = append(queue, b)
-			}
-		}
-		if queue == nil {
-			queue = []string{}
-		}
-		heldTurn := g.CurrentTurnBotID != nil && *g.CurrentTurnBotID == botID
-		if !heldTurn {
-			g.TurnQueue = queue
-			g.UpdatedAt = nowMs
-			return s.saveGroup(ctx, conn, g)
-		}
-		switch g.TurnMode {
-		case "auto_round_robin":
-			g.CurrentTurnBotID = nextAutoSpeaker(remaining, &botID, nowMs)
-			g.TurnQueue = []string{}
-			g.TurnStartedAt = nowMs
-		case "leader_round":
-			next, rest := popQueue(queue, remaining)
-			if g.Status == "running" {
-				if next != nil {
-					g.Status = "running"
-				} else {
-					g.Status = "waiting_for_leader"
-				}
-			}
-			g.CurrentTurnBotID = next
-			g.TurnQueue = rest
-			g.TurnStartedAt = nowMs
-		}
+	}
+	if queue == nil {
+		queue = []string{}
+	}
+	heldTurn := g.CurrentTurnBotID != nil && *g.CurrentTurnBotID == botID
+	if !heldTurn {
+		g.TurnQueue = queue
 		g.UpdatedAt = nowMs
 		return s.saveGroup(ctx, conn, g)
-	})
+	}
+	switch g.TurnMode {
+	case "auto_round_robin":
+		g.CurrentTurnBotID = nextAutoSpeaker(remaining, &botID, nowMs)
+		g.TurnQueue = []string{}
+		g.TurnEpoch++
+		g.TurnStartedAt = nowMs
+	case "leader_round":
+		next, rest := popQueue(queue, remaining)
+		if next != nil {
+			g.TurnEpoch++
+		}
+		if g.Status == "running" {
+			if next != nil {
+				g.Status = "running"
+			} else {
+				g.Status = "waiting_for_leader"
+			}
+		}
+		g.CurrentTurnBotID = next
+		g.TurnQueue = rest
+		g.TurnStartedAt = nowMs
+	}
+	g.UpdatedAt = nowMs
+	return s.saveGroup(ctx, conn, g)
 }
 
 // RotateToken issues a fresh 128-bit agent token for one member and returns it.

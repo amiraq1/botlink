@@ -72,14 +72,14 @@ func TestMigration4Fresh(t *testing.T) {
 	st := openTestStoreKeyed(t)
 	ctx := context.Background()
 
-	// schema_migrations must contain exactly 4 rows.
+	// schema_migrations must contain exactly 7 rows (001–007).
 	var migCount int
 	if err := st.ro.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM schema_migrations").Scan(&migCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migCount != 4 {
-		t.Errorf("want 4 migration rows, got %d", migCount)
+	if migCount != 7 {
+		t.Errorf("want 7 migration rows, got %d", migCount)
 	}
 
 	// All three new tables must be queryable.
@@ -123,7 +123,7 @@ func TestMigration4Idempotent(t *testing.T) {
 	dbPath := filepath.Join(dir, "idempotent.db")
 	key := make([]byte, 32)
 
-	// First open: all 4 migrations run.
+	// First open: all 7 migrations run.
 	s1, err := Open(dbPath, key)
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
@@ -142,8 +142,8 @@ func TestMigration4Idempotent(t *testing.T) {
 		"SELECT COUNT(*) FROM schema_migrations").Scan(&migCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migCount != 4 {
-		t.Errorf("want exactly 4 migration rows after second open, got %d", migCount)
+	if migCount != 7 {
+		t.Errorf("want exactly 7 migration rows after second open, got %d", migCount)
 	}
 
 	// Verify version 4 appears exactly once.
@@ -165,7 +165,7 @@ func TestMigration4OnPreExistingDB(t *testing.T) {
 	dbPath := filepath.Join(dir, "preexisting.db")
 	key := make([]byte, 32)
 
-	// Open fresh: all 4 migrations run.
+	// Open fresh: all 7 migrations run.
 	s1, err := Open(dbPath, key)
 	if err != nil {
 		t.Fatalf("initial Open: %v", err)
@@ -200,14 +200,14 @@ func TestMigration4OnPreExistingDB(t *testing.T) {
 		t.Fatalf("tools table missing after reopen: %v", err)
 	}
 
-	// schema_migrations must have all 4 entries.
+	// schema_migrations must have all 7 entries.
 	var migCount int
 	if err := s2.ro.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM schema_migrations").Scan(&migCount); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if migCount != 4 {
-		t.Errorf("want 4 migration rows after re-applying v4, got %d", migCount)
+	if migCount != 7 {
+		t.Errorf("want 7 migration rows after re-applying v4, got %d", migCount)
 	}
 }
 
