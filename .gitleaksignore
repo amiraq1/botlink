@@ -11,3 +11,8 @@ a94bc3be8922f4f4657e201dd78882cb5dce8cc3:cmd/server/main_test.go:generic-api-key
 9ddead5466e870b3fa4bee3d896b90e69d8c2b56:src/frontend/dist/assets/index-CHonim7j.js:generic-api-key:8305
 9ddead5466e870b3fa4bee3d896b90e69d8c2b56:src/frontend/dist/assets/index-CHonim7j.js:generic-api-key:10783
 28b8d91b78878b7a9feb3d47194157d8fd7d0ae2:internal/server/tools_test.go:generic-api-key:335
+# Commit 504a5c0 test fixtures: dummy provider/store API keys and a deterministic
+# 32-character store encryption key. These are test-only values, not credentials.
+504a5c0de53a2da8d77c38c8b85bb2b10f6a9cb2:internal/provider/deepseek_test.go:generic-api-key:196
+504a5c0de53a2da8d77c38c8b85bb2b10f6a9cb2:internal/store/managed_test.go:generic-api-key:18
+504a5c0de53a2da8d77c38c8b85bb2b10f6a9cb2:internal/agent/runner_test.go:generic-api-key:19
