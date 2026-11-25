@@ -500,3 +500,261 @@ export async function listToolCallsAudit(
   const query = limit ? `?limit=${limit}` : "";
   return request<ToolCall[]>(`/api/admin/groups/${groupId}/tool-calls${query}`);
 }
+
+// ---------------------------------------------------------------------------
+// LLM connections & managed agents (Admin) - Phase 4
+// ---------------------------------------------------------------------------
+
+export type ProviderKind = "deepseek";
+
+export interface LLMConnection {
+  id: number;
+  provider: ProviderKind;
+  label: string;
+  modelHint: string;
+  keyLast4: string;
+  hasKey: boolean;
+  lastCheckedAt: number;
+  lastCheckStatus: string;
+  lastCheckError: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface LLMConnectionInput {
+  provider: ProviderKind;
+  label: string;
+  apiKey: string;
+  modelHint: string;
+}
+
+export interface ModelPrice {
+  connectionId: number;
+  model: string;
+  inputMicrosPer1M: number;
+  outputMicrosPer1M: number;
+  currency: string;
+  updatedAt: number;
+}
+
+export interface ManagedAgent {
+  id: number;
+  groupId: number;
+  botId: string;
+  botName: string;
+  roleTitle: string;
+  connectionId: number;
+  provider: string;
+  model: string;
+  persona: string;
+  maxOutputTokens: number;
+  contextMaxMessages: number;
+  contextMaxChars: number;
+  dailyRunLimit: number;
+  dailyBudgetMicros?: number | null;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ManagedAgentInput {
+  connectionId: number;
+  model: string;
+  persona: string;
+  maxOutputTokens: number;
+  contextMaxMessages: number;
+  contextMaxChars: number;
+  dailyRunLimit: number;
+  dailyBudgetMicros?: number | null;
+  enabled: boolean;
+}
+
+export interface AgentRun {
+  id: number;
+  groupId: number;
+  botId: string;
+  agentId?: number | null;
+  turnSeq: number;
+  turnEpoch: number;
+  turnStartedAt: number;
+  attempt: number;
+  retryOf?: number | null;
+  status: string;
+  provider: string;
+  model: string;
+  requestMsgCount: number;
+  requestChars: number;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
+  estCostMicros?: number | null;
+  costMicros?: number | null;
+  costBasis: string;
+  costConfirmed: boolean;
+  responseChars: number;
+  messageId?: number | null;
+  errorCode?: string;
+  errorMsg?: string;
+  createdAt: number;
+  startedAt: number;
+  finishedAt: number;
+}
+
+export interface ManagedAgentUsage {
+  runsLast24h: number;
+  dailyRunLimit: number;
+  spentMicros: number;
+  confirmedMicros: number;
+  computedMicros: number;
+  unknownRuns: number;
+  dailyBudgetMicros?: number | null;
+  costKnown: boolean;
+  budgetState: string;
+  budgetBlocked: boolean;
+  budgetBlockReason: string;
+}
+
+export interface LLMModelProbe {
+  id: string;
+  name?: string;
+  ownedBy?: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
+export interface ConnectionCheckResult {
+  status: string;
+  models: LLMModelProbe[];
+  error?: string;
+  checkedAt: number;
+  connection: LLMConnection;
+}
+
+export async function listLLMConnections(): Promise<LLMConnection[]> {
+  return request<LLMConnection[]>("/api/admin/llm/connections");
+}
+
+export async function createLLMConnection(
+  input: LLMConnectionInput,
+): Promise<LLMConnection> {
+  return post<LLMConnection>("/api/admin/llm/connections", input);
+}
+
+export async function updateLLMConnection(
+  id: number,
+  input: LLMConnectionInput,
+): Promise<LLMConnection> {
+  return request<LLMConnection>(`/api/admin/llm/connections/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteLLMConnection(id: number): Promise<void> {
+  await request<void>(`/api/admin/llm/connections/${id}`, { method: "DELETE" });
+}
+
+export async function checkLLMConnection(
+  id: number,
+): Promise<ConnectionCheckResult> {
+  return post<ConnectionCheckResult>(`/api/admin/llm/connections/${id}/check`);
+}
+
+export async function listModelPrices(id: number): Promise<ModelPrice[]> {
+  return request<ModelPrice[]>(`/api/admin/llm/connections/${id}/prices`);
+}
+
+export async function setModelPrice(
+  connectionId: number,
+  model: string,
+  input: {
+    inputMicrosPer1M: number;
+    outputMicrosPer1M: number;
+    currency?: string;
+  },
+): Promise<ModelPrice> {
+  return request<ModelPrice>(
+    `/api/admin/llm/connections/${connectionId}/prices/${encodeURIComponent(model)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export async function deleteModelPrice(
+  connectionId: number,
+  model: string,
+): Promise<void> {
+  await request<void>(
+    `/api/admin/llm/connections/${connectionId}/prices/${encodeURIComponent(model)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function listManagedAgents(
+  groupId: number,
+): Promise<ManagedAgent[]> {
+  return request<ManagedAgent[]>(`/api/admin/groups/${groupId}/managed-agents`);
+}
+
+export async function createManagedAgent(
+  groupId: number,
+  member: { name: string; roleTitle: string; accentColor?: string },
+  agent: ManagedAgentInput,
+): Promise<ManagedAgent> {
+  return post<ManagedAgent>(`/api/admin/groups/${groupId}/managed-agents`, {
+    member,
+    agent,
+  });
+}
+
+export async function updateManagedAgent(
+  groupId: number,
+  botId: string,
+  agent: ManagedAgentInput,
+): Promise<ManagedAgent> {
+  return request<ManagedAgent>(
+    `/api/admin/groups/${groupId}/managed-agents/${botId}`,
+    {
+      method: "PUT",
+      body: JSON.stringify(agent),
+    },
+  );
+}
+
+export async function deleteManagedAgent(
+  groupId: number,
+  botId: string,
+): Promise<void> {
+  await request<void>(`/api/admin/groups/${groupId}/managed-agents/${botId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function listAgentRuns(groupId: number): Promise<AgentRun[]> {
+  return request<AgentRun[]>(`/api/admin/groups/${groupId}/agent-runs`);
+}
+
+export async function retryAgentRun(
+  groupId: number,
+  runId: number,
+): Promise<void> {
+  await post(`/api/admin/groups/${groupId}/agent-runs/${runId}/retry`);
+}
+
+export async function cancelAgentRun(
+  groupId: number,
+  runId: number,
+): Promise<void> {
+  await post(`/api/admin/groups/${groupId}/agent-runs/${runId}/cancel`);
+}
+
+export async function getManagedAgentUsage(
+  groupId: number,
+  botId: string,
+): Promise<ManagedAgentUsage> {
+  return request<ManagedAgentUsage>(
+    `/api/admin/groups/${groupId}/agents/${botId}/usage`,
+  );
+}

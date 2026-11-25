@@ -483,3 +483,258 @@ export function useToolCallsAudit(groupId: GroupId | null, limit = 50) {
     refetchIntervalInBackground: false,
   });
 }
+
+// ---------------------------------------------------------------------------
+// LLM connections & managed agents (Phase 4)
+// ---------------------------------------------------------------------------
+
+import * as managedApi from "@/lib/api";
+
+export function useLLMConnections() {
+  return useQuery<managedApi.LLMConnection[]>({
+    queryKey: ["admin", "llm", "connections"],
+    queryFn: () => managedApi.listLLMConnections(),
+    staleTime: 5000,
+  });
+}
+
+export function useCreateLLMConnection() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    managedApi.LLMConnection,
+    Error,
+    managedApi.LLMConnectionInput
+  >({
+    mutationFn: (input) => managedApi.createLLMConnection(input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "llm", "connections"],
+      });
+    },
+  });
+}
+
+export function useUpdateLLMConnection() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    managedApi.LLMConnection,
+    Error,
+    { id: number; input: managedApi.LLMConnectionInput }
+  >({
+    mutationFn: ({ id, input }) => managedApi.updateLLMConnection(id, input),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "llm", "connections"],
+      });
+    },
+  });
+}
+
+export function useDeleteLLMConnection() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, number>({
+    mutationFn: (id) => managedApi.deleteLLMConnection(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "llm", "connections"],
+      });
+    },
+  });
+}
+
+export function useCheckLLMConnection() {
+  const queryClient = useQueryClient();
+  return useMutation<managedApi.ConnectionCheckResult, Error, number>({
+    mutationFn: (id) => managedApi.checkLLMConnection(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "llm", "connections"],
+      });
+    },
+  });
+}
+
+export function useManagedAgents(groupId: number | null) {
+  return useQuery<managedApi.ManagedAgent[]>({
+    queryKey:
+      groupId === null
+        ? ["admin", "managed-agents", "none"]
+        : ["admin", "groups", groupId.toString(), "managed-agents"],
+    queryFn: () =>
+      groupId === null ? [] : managedApi.listManagedAgents(groupId),
+    enabled: groupId !== null,
+    staleTime: 5000,
+  });
+}
+
+export function useCreateManagedAgent() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    managedApi.ManagedAgent,
+    Error,
+    {
+      groupId: number;
+      member: { name: string; roleTitle: string; accentColor?: string };
+      agent: managedApi.ManagedAgentInput;
+    }
+  >({
+    mutationFn: ({ groupId, member, agent }) =>
+      managedApi.createManagedAgent(groupId, member, agent),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "groups", groupId.toString(), "managed-agents"],
+      });
+      queryClient.invalidateQueries({ queryKey: groupsKey });
+    },
+  });
+}
+
+export function useUpdateManagedAgent() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    managedApi.ManagedAgent,
+    Error,
+    { groupId: number; botId: string; agent: managedApi.ManagedAgentInput }
+  >({
+    mutationFn: ({ groupId, botId, agent }) =>
+      managedApi.updateManagedAgent(groupId, botId, agent),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "groups", groupId.toString(), "managed-agents"],
+      });
+    },
+  });
+}
+
+export function useDeleteManagedAgent() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { groupId: number; botId: string }>({
+    mutationFn: ({ groupId, botId }) =>
+      managedApi.deleteManagedAgent(groupId, botId),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "groups", groupId.toString(), "managed-agents"],
+      });
+      queryClient.invalidateQueries({ queryKey: groupsKey });
+    },
+  });
+}
+
+export function useAgentRuns(groupId: number | null) {
+  return useQuery<managedApi.AgentRun[]>({
+    queryKey:
+      groupId === null
+        ? ["admin", "agent-runs", "none"]
+        : ["admin", "groups", groupId.toString(), "agent-runs"],
+    queryFn: () => (groupId === null ? [] : managedApi.listAgentRuns(groupId)),
+    enabled: groupId !== null,
+    refetchInterval: 5000,
+  });
+}
+
+export function useRetryAgentRun() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { groupId: number; runId: number }>({
+    mutationFn: ({ groupId, runId }) =>
+      managedApi.retryAgentRun(groupId, runId),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "groups", groupId.toString(), "agent-runs"],
+      });
+    },
+  });
+}
+
+export function useCancelAgentRun() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { groupId: number; runId: number }>({
+    mutationFn: ({ groupId, runId }) =>
+      managedApi.cancelAgentRun(groupId, runId),
+    onSuccess: (_data, { groupId }) => {
+      queryClient.invalidateQueries({
+        queryKey: ["admin", "groups", groupId.toString(), "agent-runs"],
+      });
+    },
+  });
+}
+
+export function useManagedAgentUsage(
+  groupId: number | null,
+  botId: string | null,
+) {
+  return useQuery<managedApi.ManagedAgentUsage | null>({
+    queryKey:
+      groupId === null || botId === null
+        ? ["admin", "managed-usage", "none"]
+        : ["admin", "groups", groupId.toString(), "agents", botId, "usage"],
+    queryFn: async () =>
+      groupId === null || botId === null
+        ? null
+        : managedApi.getManagedAgentUsage(groupId, botId),
+    enabled: groupId !== null && botId !== null,
+    refetchInterval: 10000,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Model prices (Phase 4)
+// ---------------------------------------------------------------------------
+
+export function useModelPrices(connectionId: number | null) {
+  return useQuery<managedApi.ModelPrice[]>({
+    queryKey:
+      connectionId === null
+        ? ["admin", "model-prices", "none"]
+        : ["admin", "llm", "connections", connectionId.toString(), "prices"],
+    queryFn: () =>
+      connectionId === null ? [] : managedApi.listModelPrices(connectionId),
+    enabled: connectionId !== null,
+    staleTime: 5000,
+  });
+}
+
+export function useSetModelPrice() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    managedApi.ModelPrice,
+    Error,
+    {
+      connectionId: number;
+      model: string;
+      input: Parameters<typeof managedApi.setModelPrice>[2];
+    }
+  >({
+    mutationFn: ({ connectionId, model, input }) =>
+      managedApi.setModelPrice(connectionId, model, input),
+    onSuccess: (_data, { connectionId }) => {
+      queryClient.invalidateQueries({
+        queryKey: [
+          "admin",
+          "llm",
+          "connections",
+          connectionId.toString(),
+          "prices",
+        ],
+      });
+    },
+  });
+}
+
+export function useDeleteModelPrice() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, { connectionId: number; model: string }>({
+    mutationFn: ({ connectionId, model }) =>
+      managedApi.deleteModelPrice(connectionId, model),
+    onSuccess: (_data, { connectionId }) => {
+      queryClient.invalidateQueries({
+        queryKey: [
+          "admin",
+          "llm",
+          "connections",
+          connectionId.toString(),
+          "prices",
+        ],
+      });
+    },
+  });
+}

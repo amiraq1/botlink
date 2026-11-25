@@ -1,17 +1,21 @@
 import CreateGroupCard from "@/components/groups/CreateGroupCard";
 import GroupsList from "@/components/groups/GroupsList";
+import ManagedAgentsManagement from "@/components/managed/ManagedAgentsManagement";
 import ToolsManagement from "@/components/tools/ToolsManagement";
 import { cn } from "@/lib/utils";
-import { MessageSquare, Wrench } from "lucide-react";
+import { Bot, MessageSquare, Wrench } from "lucide-react";
 import { useState } from "react";
 
 const TABS = [
   { id: "groups", label: "المجموعات", icon: MessageSquare },
   { id: "tools", label: "الأدوات", icon: Wrench },
+  { id: "managed", label: "الوكلاء المُدارون", icon: Bot },
 ] as const;
 
 export default function AdminDashboardPage() {
-  const [activeTab, setActiveTab] = useState<"groups" | "tools">("groups");
+  const [activeTab, setActiveTab] = useState<"groups" | "tools" | "managed">(
+    "groups",
+  );
 
   return (
     <div
@@ -68,8 +72,10 @@ export default function AdminDashboardPage() {
             <CreateGroupCard />
           </div>
         </div>
-      ) : (
+      ) : activeTab === "tools" ? (
         <ToolsManagement />
+      ) : (
+        <ManagedAgentsManagement />
       )}
     </div>
   );
