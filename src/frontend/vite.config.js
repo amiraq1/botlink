@@ -33,7 +33,9 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://localhost:8080",
-        changeOrigin: true,
+        // Keep the browser's Host so the Go server's same-origin CSRF check
+        // (Origin host must equal Host) passes for mutating /api/admin calls.
+        changeOrigin: false,
       },
     },
   },

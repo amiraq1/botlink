@@ -69,7 +69,10 @@ function MessageBubble({
         </span>
         <div className="flex items-end gap-2">
           <div className="bubble-bot bubble-tail min-w-0 px-4 py-2.5 text-base leading-relaxed">
-            <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+            <p
+              dir="auto"
+              className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+            >
               {message.content}
             </p>
           </div>

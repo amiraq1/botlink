@@ -125,6 +125,9 @@ function LoginPrompt() {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<LoginError | null>(null);
   const [cooldown, setCooldown] = useState(0);
+  // Whether the cooldown length came from the server's Retry-After header;
+  // the local fallback must not be presented as a server-provided duration.
+  const [cooldownFromServer, setCooldownFromServer] = useState(false);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -149,6 +152,7 @@ function LoginPrompt() {
     } catch (err) {
       if (err instanceof ApiError && err.status === 429) {
         setCooldown(err.retryAfterSec ?? RATE_FALLBACK_SEC);
+        setCooldownFromServer(err.retryAfterSec !== null);
         setError("rate");
       } else if (
         err instanceof Error &&
@@ -168,7 +172,9 @@ function LoginPrompt() {
   const errorText: string | null =
     error === "rate"
       ? cooldown > 0
-        ? `محاولات كثيرة خلال وقت قصير. أعد المحاولة بعد ${formatNumberAr(cooldown)} ثانية.`
+        ? cooldownFromServer
+          ? `محاولات كثيرة خلال وقت قصير. أعد المحاولة بعد ${formatNumberAr(cooldown)} ثانية.`
+          : `محاولات كثيرة خلال وقت قصير. أعد المحاولة بعد نحو ${formatNumberAr(cooldown)} ثانية (تقدير محلي).`
         : "محاولات كثيرة. يمكنك المحاولة الآن مجدداً."
       : error === "config"
         ? "تسجيل الدخول غير مفعّل على الخادم: حدّد ADMIN_PASSWORD أولاً."
@@ -221,7 +227,9 @@ function LoginPrompt() {
           disabled={locked || password.length === 0}
         >
           {cooldown > 0
-            ? `المحاولة بعد ${formatNumberAr(cooldown)} ثانية`
+            ? cooldownFromServer
+              ? `المحاولة بعد ${formatNumberAr(cooldown)} ثانية`
+              : `المحاولة بعد نحو ${formatNumberAr(cooldown)} ثانية`
             : pending
               ? "جارٍ تسجيل الدخول…"
               : "تسجيل الدخول"}

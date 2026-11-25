@@ -64,6 +64,7 @@ export default function Composer({
                 data-ocid={`groupchat.mention_chip.${i + 1}`}
                 onClick={() => insertMention(m.name)}
                 disabled={ended}
+                dir="ltr"
                 className={cn(
                   accentClass(m.accentColor, m.name),
                   "mention-chip min-h-8 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/60 disabled:opacity-50",

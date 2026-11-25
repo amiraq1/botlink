@@ -104,8 +104,21 @@ export default function MessageStream({
   };
 
   // Scroll only when the list grows; only moves when pinned to the bottom.
+  // Rows reserve an estimated height until they are painted, so the first
+  // scroll can land short on a long log; re-pin once layout settles.
   useEffect(() => {
-    if (detail.messages.length > 0 && pinned.current) scrollToEnd(false);
+    if (detail.messages.length === 0 || !pinned.current) return;
+    scrollToEnd(false);
+    const frame = window.requestAnimationFrame(() => {
+      if (pinned.current) scrollToEnd(false);
+    });
+    const settle = window.setTimeout(() => {
+      if (pinned.current) scrollToEnd(false);
+    }, 120);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(settle);
+    };
   }, [detail.messages.length, scrollToEnd]);
 
   const items = useMemo(() => buildItems(detail.messages), [detail.messages]);
